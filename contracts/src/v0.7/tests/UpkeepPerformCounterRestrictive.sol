@@ -7,7 +7,11 @@ contract UpkeepPerformCounterRestrictive {
   uint256 public nextEligible = 0;
   uint256 public testRange;
   uint256 public averageEligibilityCadence;
-  uint256 count = 0;
+  uint256 public checkGasToBurn;
+  uint256 public performGasToBurn;
+  mapping(bytes32 => bool) public dummyMap; // used to force storage lookup
+
+  uint256 private count = 0;
 
   constructor(uint256 _testRange, uint256 _averageEligibilityCadence) {
     testRange = _testRange;
@@ -15,10 +19,17 @@ contract UpkeepPerformCounterRestrictive {
   }
 
   function checkUpkeep(bytes calldata data) external view returns (bool, bytes memory) {
-    return (eligible(), bytes(""));
+    uint256 startGas = gasleft();
+    bool dummy;
+    // burn gas
+    while (startGas - gasleft() < checkGasToBurn) {
+      dummy = dummy && dummyMap[blockhash(block.number)]; // arbitrary state reads
+    }
+    return (eligible(), abi.encode(dummy));
   }
 
   function performUpkeep(bytes calldata data) external {
+    uint256 startGas = gasleft();
     bool eligible = eligible();
     uint256 blockNum = block.number;
     emit PerformingUpkeep(eligible, tx.origin, initialCall, nextEligible, blockNum);
@@ -28,6 +39,18 @@ contract UpkeepPerformCounterRestrictive {
     }
     nextEligible = (blockNum + (rand() % (averageEligibilityCadence * 2))) + 1;
     count++;
+    // burn gas
+    while (startGas - gasleft() < performGasToBurn) {
+      dummyMap[blockhash(block.number)] = false;
+    }
+  }
+
+  function setCheckGasToBurn(uint256 value) public {
+    checkGasToBurn = value;
+  }
+
+  function setPerformGasToBurn(uint256 value) public {
+    performGasToBurn = value;
   }
 
   function getCountPerforms() public view returns (uint256) {
