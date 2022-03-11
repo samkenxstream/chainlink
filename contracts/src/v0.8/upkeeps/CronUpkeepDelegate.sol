@@ -33,6 +33,9 @@ contract CronUpkeepDelegate {
     // DEV: start at a random spot in the list so that checks are
     // spread evenly among cron jobs
     uint256 numCrons = s_activeCronJobIDs.length();
+    if (numCrons == 0) {
+      return (false, bytes(""));
+    }
     uint256 startIdx = block.number % numCrons;
     bool result;
     bytes memory payload;
