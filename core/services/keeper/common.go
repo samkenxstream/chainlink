@@ -1,7 +1,11 @@
 package keeper
 
 import (
+	"fmt"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	evmtypes "github.com/smartcontractkit/chainlink/core/chains/evm/types"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/keeper_registry_wrapper"
@@ -22,4 +26,14 @@ type Config interface {
 	KeeperRegistrySyncUpkeepQueueSize() uint32
 	KeeperCheckUpkeepGasPriceFeatureEnabled() bool
 	LogSQL() bool
+}
+
+//toBinary takes a hash and converts it to a binary string
+func toBinary(hash common.Hash) (string, error) {
+	big, err := hexutil.DecodeBig(hash.Hex())
+	if err != nil {
+		return "", err
+	}
+	binaryString := fmt.Sprintf("%b", big)
+	return binaryString, nil
 }

@@ -1,6 +1,7 @@
 package keeper
 
 import (
+	"fmt"
 	"math/rand"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/smartcontractkit/sqlx"
 
 	"github.com/smartcontractkit/chainlink/core/chains/evm/txmgr"
+	"github.com/smartcontractkit/chainlink/core/chains/evm/types"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
 	"github.com/smartcontractkit/chainlink/core/services/pg"
@@ -42,6 +44,13 @@ func (korm ORM) Registries() ([]Registry, error) {
 	var registries []Registry
 	err := korm.q.Select(&registries, `SELECT * FROM keeper_registries ORDER BY id ASC`)
 	return registries, errors.Wrap(err, "failed to get registries")
+}
+
+// RegistryByAddress returns a single registry based on provided address
+func (korm ORM) RegistryByAddress(registryAddress ethkey.EIP55Address) (Registry, error) {
+	var registry Registry
+	err := korm.q.Get(&registry, `SELECT * FROM keeper_registries WHERE keeper_registries.contract_address = $1 LIMIT 1`, registryAddress)
+	return registry, errors.Wrap(err, "failed to get registry")
 }
 
 // RegistryForJob returns a specific registry for a job with the given ID
@@ -99,8 +108,23 @@ DELETE FROM upkeep_registrations WHERE registry_id IN (
 	return rowsAffected, nil
 }
 
-func (korm ORM) EligibleUpkeepsForRegistry(registryAddress ethkey.EIP55Address, blockNumber, gracePeriod int64) (upkeeps []UpkeepRegistration, err error) {
-	stmt := `
+func (korm ORM) EligibleUpkeepsForRegistry(registryAddress ethkey.EIP55Address, head *types.Head, gracePeriod int64) (upkeeps []UpkeepRegistration, err error) {
+	registry, err := korm.RegistryByAddress(registryAddress)
+	if err != nil {
+		return nil, errors.Wrap(err, "EligibleUpkeepsForRegistry failed to get a registry by address")
+	}
+	blockNumber := head.Number
+	fmt.Println("blockNumber: ", blockNumber)
+	firstHeadInTurn := blockNumber - (blockNumber % int64(registry.BlockCountPerTurn))
+	firstHeadInTurnHash := head.HashAtHeight(firstHeadInTurn)
+	binaryHash, err := toBinary(firstHeadInTurnHash)
+	if err != nil {
+		return nil, errors.Wrap(err, "EligibleUpkeepsForRegistry failed to convert hash to binary")
+	}
+	fmt.Println(binaryHash)
+
+	err = korm.q.Transaction(func(tx pg.Queryer) error {
+		stmt := `
 SELECT upkeep_registrations.* FROM upkeep_registrations
 INNER JOIN keeper_registries ON keeper_registries.id = upkeep_registrations.registry_id
 WHERE
@@ -111,18 +135,18 @@ WHERE
 			upkeep_registrations.last_run_block_height + $2 < $3 AND
 			upkeep_registrations.last_run_block_height < ($3 - ($3 % keeper_registries.block_count_per_turn))
 		)
-	) AND
-	keeper_registries.keeper_index = (
-		upkeep_registrations.positioning_constant + (($3 - ($3 % keeper_registries.block_count_per_turn)) / keeper_registries.block_count_per_turn)
-	) % keeper_registries.num_keepers
-ORDER BY upkeep_registrations.id ASC, upkeep_registrations.upkeep_id ASC
+	)
+	AND keeper_registries.keeper_index =
+		(CAST(upkeep_registrations.positioning_constant AS bit(32)) # CAST($4 AS bit(32)))::int % keeper_registries.num_keepers
 `
-	if err = korm.q.Select(&upkeeps, stmt, registryAddress, gracePeriod, blockNumber); err != nil {
-		return upkeeps, errors.Wrap(err, "EligibleUpkeepsForRegistry failed to get upkeep_registrations")
-	}
-	if err = loadUpkeepsRegistry(korm.q, upkeeps); err != nil {
-		return upkeeps, errors.Wrap(err, "EligibleUpkeepsForRegistry failed to load Registry on upkeeps")
-	}
+		if err = tx.Select(&upkeeps, stmt, registryAddress, gracePeriod, blockNumber, binaryHash); err != nil {
+			return errors.Wrap(err, "EligibleUpkeepsForRegistry failed to get upkeep_registrations")
+		}
+		if err = loadUpkeepsRegistry(tx, upkeeps); err != nil {
+			return errors.Wrap(err, "EligibleUpkeepsForRegistry failed to load Registry on upkeeps")
+		}
+		return nil
+	}, pg.OptReadOnlyTx())
 
 	rand.Seed(time.Now().UnixNano())
 	rand.Shuffle(len(upkeeps), func(i, j int) {
@@ -135,6 +159,7 @@ ORDER BY upkeep_registrations.id ASC, upkeep_registrations.upkeep_id ASC
 func loadUpkeepsRegistry(q pg.Queryer, upkeeps []UpkeepRegistration) error {
 	registryIDM := make(map[int64]*Registry)
 	var registryIDs []int64
+	// is this loop necessary when our previous query only selects a single registry
 	for _, upkeep := range upkeeps {
 		if _, exists := registryIDM[upkeep.RegistryID]; !exists {
 			registryIDM[upkeep.RegistryID] = new(Registry)

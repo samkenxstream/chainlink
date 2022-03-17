@@ -145,7 +145,7 @@ func (ex *UpkeepExecuter) processActiveUpkeeps() {
 
 	activeUpkeeps, err := ex.orm.EligibleUpkeepsForRegistry(
 		ex.job.KeeperSpec.ContractAddress,
-		head.Number,
+		head,
 		ex.config.KeeperMaximumGracePeriod(),
 	)
 	if err != nil {

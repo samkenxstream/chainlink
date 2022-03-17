@@ -1,6 +1,8 @@
 package keeper_test
 
 import (
+	"fmt"
+	"math/big"
 	"testing"
 	"time"
 
@@ -12,11 +14,13 @@ import (
 
 	evmconfig "github.com/smartcontractkit/chainlink/core/chains/evm/config"
 	"github.com/smartcontractkit/chainlink/core/chains/evm/txmgr"
+	evmtypes "github.com/smartcontractkit/chainlink/core/chains/evm/types"
 	"github.com/smartcontractkit/chainlink/core/internal/cltest"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/evmtest"
 	"github.com/smartcontractkit/chainlink/core/internal/testutils/pgtest"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/keeper"
+	"github.com/smartcontractkit/chainlink/core/utils"
 )
 
 var (
@@ -145,6 +149,9 @@ func TestKeeperDB_EligibleUpkeeps_Shuffle(t *testing.T) {
 
 	registry, _ := cltest.MustInsertKeeperRegistry(t, db, orm, ethKeyStore)
 
+	head := evmtypes.NewHead(big.NewInt(blockheight), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&head, registry)
+
 	ordered := [100]int64{}
 	for i := 0; i < 100; i++ {
 		k := newUpkeep(registry, int64(i))
@@ -155,7 +162,7 @@ func TestKeeperDB_EligibleUpkeeps_Shuffle(t *testing.T) {
 
 	cltest.AssertCount(t, db, "upkeep_registrations", 100)
 
-	eligibleUpkeeps, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, blockheight, gracePeriod)
+	eligibleUpkeeps, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &head, gracePeriod)
 	assert.NoError(t, err)
 
 	require.Len(t, eligibleUpkeeps, 100)
@@ -175,6 +182,8 @@ func TestKeeperDB_EligibleUpkeeps_BlockCountPerTurn(t *testing.T) {
 	gracePeriod := int64(10)
 
 	registry, _ := cltest.MustInsertKeeperRegistry(t, db, orm, ethKeyStore)
+	head := evmtypes.NewHead(big.NewInt(blockheight), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&head, registry)
 
 	upkeeps := [5]keeper.UpkeepRegistration{
 		newUpkeep(registry, 0),
@@ -197,7 +206,7 @@ func TestKeeperDB_EligibleUpkeeps_BlockCountPerTurn(t *testing.T) {
 
 	cltest.AssertCount(t, db, "upkeep_registrations", 5)
 
-	eligibleUpkeeps, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, blockheight, gracePeriod)
+	eligibleUpkeeps, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &head, gracePeriod)
 	assert.NoError(t, err)
 
 	// 3 out of 5 are eligible, check that ids are 0,1 or 2 but order is shuffled so can not use equals
@@ -227,6 +236,9 @@ func TestKeeperDB_EligibleUpkeeps_GracePeriod(t *testing.T) {
 	gracePeriod := int64(100)
 
 	registry, _ := cltest.MustInsertKeeperRegistry(t, db, orm, ethKeyStore)
+	head := evmtypes.NewHead(big.NewInt(blockheight), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&head, registry)
+
 	upkeep1 := newUpkeep(registry, 0)
 	upkeep1.LastRunBlockHeight = 0
 	upkeep2 := newUpkeep(registry, 1)
@@ -241,7 +253,7 @@ func TestKeeperDB_EligibleUpkeeps_GracePeriod(t *testing.T) {
 
 	cltest.AssertCount(t, db, "upkeep_registrations", 3)
 
-	eligibleUpkeeps, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, blockheight, gracePeriod)
+	eligibleUpkeeps, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &head, gracePeriod)
 	assert.NoError(t, err)
 	// 2 out of 3 are eligible, check that ids are 0 or 1 but order is shuffled so can not use equals
 	assert.Len(t, eligibleUpkeeps, 2)
@@ -262,17 +274,33 @@ func TestKeeperDB_EligibleUpkeeps_KeepersRotate(t *testing.T) {
 	cltest.AssertCount(t, db, "keeper_registries", 1)
 	cltest.AssertCount(t, db, "upkeep_registrations", 1)
 
+	fmt.Println("BCPT: ", registry.BlockCountPerTurn)
+
 	// out of 5 valid block ranges, with 5 keepers, we are eligible
 	// to submit on exactly 1 of them
-	list1, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, 20, 0)
+	h1 := evmtypes.NewHead(big.NewInt(20), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h1, registry)
+	list1, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h1, 0)
 	require.NoError(t, err)
-	list2, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, 41, 0)
+
+	h2 := evmtypes.NewHead(big.NewInt(41), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h2, registry)
+	list2, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h2, 0)
 	require.NoError(t, err)
-	list3, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, 62, 0)
+
+	h3 := evmtypes.NewHead(big.NewInt(62), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h3, registry)
+	list3, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h3, 0)
 	require.NoError(t, err)
-	list4, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, 83, 0)
+
+	h4 := evmtypes.NewHead(big.NewInt(83), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h4, registry)
+	list4, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h4, 0)
 	require.NoError(t, err)
-	list5, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, 104, 0)
+
+	h5 := evmtypes.NewHead(big.NewInt(104), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h5, registry)
+	list5, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h5, 0)
 	require.NoError(t, err)
 
 	totalEligible := len(list1) + len(list2) + len(list3) + len(list4) + len(list5)
@@ -295,15 +323,25 @@ func TestKeeperDB_EligibleUpkeeps_KeepersCycleAllUpkeeps(t *testing.T) {
 	cltest.AssertCount(t, db, "upkeep_registrations", 1000)
 
 	// in a full cycle, each node should be responsible for each upkeep exactly once
-	list1, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, 20, 0) // someone eligible
+	h1 := evmtypes.NewHead(big.NewInt(20), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h1, registry)
+	list1, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h1, 0) // someone eligible
 	require.NoError(t, err)
-	list2, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, 40, 0) // someone eligible
+	h2 := evmtypes.NewHead(big.NewInt(40), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h2, registry)
+	list2, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h2, 0) // someone eligible
 	require.NoError(t, err)
-	list3, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, 60, 0) // someone eligible
+	h3 := evmtypes.NewHead(big.NewInt(60), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h3, registry)
+	list3, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h3, 0) // someone eligible
 	require.NoError(t, err)
-	list4, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, 80, 0) // someone eligible
+	h4 := evmtypes.NewHead(big.NewInt(80), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h4, registry)
+	list4, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h4, 0) // someone eligible
 	require.NoError(t, err)
-	list5, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, 100, 0) // someone eligible
+	h5 := evmtypes.NewHead(big.NewInt(100), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h5, registry)
+	list5, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h5, 0) // someone eligible
 	require.NoError(t, err)
 
 	totalEligible := len(list1) + len(list2) + len(list3) + len(list4) + len(list5)
@@ -324,9 +362,10 @@ func TestKeeperDB_EligibleUpkeeps_FiltersByRegistry(t *testing.T) {
 	cltest.AssertCount(t, db, "keeper_registries", 2)
 	cltest.AssertCount(t, db, "upkeep_registrations", 2)
 
-	list1, err := orm.EligibleUpkeepsForRegistry(registry1.ContractAddress, 20, 0)
+	head := evmtypes.NewHead(big.NewInt(20), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	list1, err := orm.EligibleUpkeepsForRegistry(registry1.ContractAddress, &head, 0)
 	require.NoError(t, err)
-	list2, err := orm.EligibleUpkeepsForRegistry(registry2.ContractAddress, 20, 0)
+	list2, err := orm.EligibleUpkeepsForRegistry(registry2.ContractAddress, &head, 0)
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, len(list1))
@@ -373,4 +412,12 @@ func TestKeeperDB_SetLastRunHeightForUpkeepOnJob(t *testing.T) {
 	assertLastRunHeight(t, db, upkeep, 100)
 	orm.SetLastRunHeightForUpkeepOnJob(j.ID, upkeep.UpkeepID, 0)
 	assertLastRunHeight(t, db, upkeep, 0)
+}
+
+// turn taking algo needs the turn head hash to be in the history
+func putTurnBlockAsParent(head *evmtypes.Head, registry keeper.Registry) {
+	firstHeadInTurn := head.Number - (head.Number % int64(registry.BlockCountPerTurn))
+	fmt.Println("first head in turn: ", firstHeadInTurn)
+	headParent := evmtypes.NewHead(big.NewInt(firstHeadInTurn), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	head.Parent = &headParent
 }
