@@ -176,7 +176,7 @@ func (rs *RegistrySynchronizer) handleUpkeepPerformed(broadcast log.Broadcast) {
 	}
 
 	// set last run to 0 so that keeper can resume checkUpkeep()
-	err = rs.orm.SetLastRunHeightForUpkeepOnJob(rs.job.ID, log.Id.Int64(), 0)
+	err = rs.orm.SetLastRunInfoForUpkeepOnJob(rs.job.ID, log.Id.Int64(), 0, log.From)
 	if err != nil {
 		rs.logger.With("error", err).Error("failed to set last run to 0")
 		return

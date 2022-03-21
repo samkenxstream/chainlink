@@ -226,7 +226,7 @@ func (ex *UpkeepExecuter) execute(upkeep UpkeepRegistration, head *evmtypes.Head
 
 	// Only after task runs where a tx was broadcast
 	if run.State == pipeline.RunStatusCompleted {
-		err := ex.orm.SetLastRunHeightForUpkeepOnJob(ex.job.ID, upkeep.UpkeepID, head.Number, pg.WithParentCtx(ctxService))
+		err := ex.orm.SetLastRunInfoForUpkeepOnJob(ex.job.ID, upkeep.UpkeepID, head.Number, upkeep.Registry.FromAddress.Address(), pg.WithParentCtx(ctxService))
 		if err != nil {
 			svcLogger.With("error", err).Error("failed to set last run height for upkeep")
 		}

@@ -2,9 +2,11 @@ package keeper
 
 import (
 	"fmt"
+	"math/big"
 	"math/rand"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/lib/pq"
 	"github.com/pkg/errors"
 	"github.com/smartcontractkit/sqlx"
@@ -114,14 +116,10 @@ func (korm ORM) EligibleUpkeepsForRegistry(registryAddress ethkey.EIP55Address, 
 		return nil, errors.Wrap(err, "EligibleUpkeepsForRegistry failed to get a registry by address")
 	}
 	blockNumber := head.Number
-	fmt.Println("blockNumber: ", blockNumber)
-	firstHeadInTurn := blockNumber - (blockNumber % int64(registry.BlockCountPerTurn))
-	firstHeadInTurnHash := head.HashAtHeight(firstHeadInTurn)
-	binaryHash, err := toBinary(firstHeadInTurnHash)
+	binaryHash, err := getBinaryOfFirstTurnInHead(blockNumber, registry, head)
 	if err != nil {
 		return nil, errors.Wrap(err, "EligibleUpkeepsForRegistry failed to convert hash to binary")
 	}
-	fmt.Println(binaryHash)
 
 	err = korm.q.Transaction(func(tx pg.Queryer) error {
 		stmt := `
@@ -136,8 +134,24 @@ WHERE
 			upkeep_registrations.last_run_block_height < ($3 - ($3 % keeper_registries.block_count_per_turn))
 		)
 	)
-	AND keeper_registries.keeper_index =
-		(CAST(upkeep_registrations.positioning_constant AS bit(32)) # CAST($4 AS bit(32)))::int % keeper_registries.num_keepers
+	AND 
+   -- my turn AND last perform not by me
+    (
+                keeper_registries.keeper_index = ((CAST(upkeep_registrations.positioning_constant AS bit(32)) #
+                                                   CAST($4 AS bit(32)))::int % keeper_registries.num_keepers)
+            AND
+                (upkeep_registrations.last_keeper_index != keeper_registries.keeper_index OR last_keeper_index IS NULL)
+        )
+   OR
+   -- buddy's turn AND last run by buddy so cover for them
+    (
+                    (keeper_registries.keeper_index + 1) % keeper_registries.num_keepers =
+                    ((CAST(upkeep_registrations.positioning_constant AS bit(32)) #
+                      CAST($4 AS bit(32)))::int % keeper_registries.num_keepers)
+            AND
+                    upkeep_registrations.last_keeper_index =
+                    (keeper_registries.keeper_index + 1) % keeper_registries.num_keepers
+        )
 `
 		if err = tx.Select(&upkeeps, stmt, registryAddress, gracePeriod, blockNumber, binaryHash); err != nil {
 			return errors.Wrap(err, "EligibleUpkeepsForRegistry failed to get upkeep_registrations")
@@ -154,6 +168,16 @@ WHERE
 	})
 
 	return upkeeps, err
+}
+
+// getBinaryOfFirstTurnInHead first calculates the first potential head for a turn. It then gets the hash for that head and converts it to binary
+func getBinaryOfFirstTurnInHead(blockNumber int64, registry Registry, head *types.Head) (string, error) {
+	firstHeadInTurn := blockNumber - (blockNumber % int64(registry.BlockCountPerTurn))
+	firstHeadInTurnHash := head.HashAtHeight(firstHeadInTurn)
+	bigInt := new(big.Int)
+	bigInt.SetString(firstHeadInTurnHash.Hex(), 0)
+	binaryString := fmt.Sprintf("%b", bigInt)
+	return binaryString, nil
 }
 
 func loadUpkeepsRegistry(q pg.Queryer, upkeeps []UpkeepRegistration) error {
@@ -191,13 +215,14 @@ WHERE registry_id = $1
 	return nextID, errors.Wrap(err, "LowestUnsyncedID failed")
 }
 
-func (korm ORM) SetLastRunHeightForUpkeepOnJob(jobID int32, upkeepID, height int64, qopts ...pg.QOpt) error {
+func (korm ORM) SetLastRunInfoForUpkeepOnJob(jobID int32, upkeepID, height int64, from common.Address, qopts ...pg.QOpt) error {
 	_, err := korm.q.WithOpts(qopts...).Exec(`
 UPDATE upkeep_registrations
-SET last_run_block_height = $1
+SET last_run_block_height = $1,
+    last_keeper_index = (SELECT keeper_index FROM keeper_registries WHERE from_address = $4)
 WHERE upkeep_id = $2 AND
 registry_id = (
 	SELECT id FROM keeper_registries WHERE job_id = $3
-)`, height, upkeepID, jobID)
-	return errors.Wrap(err, "SetLastRunHeightForUpkeepOnJob failed")
+)`, height, upkeepID, jobID, from)
+	return errors.Wrap(err, "SetLastRunInfoForUpkeepOnJob failed")
 }
