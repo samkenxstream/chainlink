@@ -80,6 +80,19 @@ func TestKeeperDB_Registries(t *testing.T) {
 	require.Equal(t, 2, len(existingRegistries))
 }
 
+func TestKeeperDB_RegistryByContractAddress(t *testing.T) {
+	t.Parallel()
+	db, config, orm := setupKeeperDB(t)
+	ethKeyStore := cltest.NewKeyStore(t, db, config).Eth()
+
+	registry, _ := cltest.MustInsertKeeperRegistry(t, db, orm, ethKeyStore, 0, 1, 20)
+	cltest.MustInsertKeeperRegistry(t, db, orm, ethKeyStore, 0, 1, 20)
+
+	registryByContractAddress, err := orm.RegistryByContractAddress(registry.ContractAddress)
+	require.NoError(t, err)
+	require.Equal(t, registry, registryByContractAddress)
+}
+
 func TestKeeperDB_UpsertUpkeep(t *testing.T) {
 	t.Parallel()
 	db, config, orm := setupKeeperDB(t)

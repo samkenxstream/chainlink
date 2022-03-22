@@ -48,8 +48,8 @@ func (korm ORM) Registries() ([]Registry, error) {
 	return registries, errors.Wrap(err, "failed to get registries")
 }
 
-// RegistryByAddress returns a single registry based on provided address
-func (korm ORM) RegistryByAddress(registryAddress ethkey.EIP55Address) (Registry, error) {
+// RegistryByContractAddress returns a single registry based on provided address
+func (korm ORM) RegistryByContractAddress(registryAddress ethkey.EIP55Address) (Registry, error) {
 	var registry Registry
 	err := korm.q.Get(&registry, `SELECT * FROM keeper_registries WHERE keeper_registries.contract_address = $1 LIMIT 1`, registryAddress)
 	return registry, errors.Wrap(err, "failed to get registry")
@@ -111,12 +111,12 @@ DELETE FROM upkeep_registrations WHERE registry_id IN (
 }
 
 func (korm ORM) EligibleUpkeepsForRegistry(registryAddress ethkey.EIP55Address, head *types.Head, gracePeriod int64) (upkeeps []UpkeepRegistration, err error) {
-	registry, err := korm.RegistryByAddress(registryAddress)
+	registry, err := korm.RegistryByContractAddress(registryAddress)
 	if err != nil {
 		return nil, errors.Wrap(err, "EligibleUpkeepsForRegistry failed to get a registry by address")
 	}
 	blockNumber := head.Number
-	binaryHash, err := getBinaryOfFirstTurnInHead(blockNumber, registry, head)
+	binaryHash, err := binaryOfFirstHashInTurn(blockNumber, registry, head)
 	if err != nil {
 		return nil, errors.Wrap(err, "EligibleUpkeepsForRegistry failed to convert hash to binary")
 	}
@@ -135,7 +135,7 @@ WHERE
 		)
 	)
 	AND 
-   -- my turn AND last perform not by me
+   -- this keeper's turn AND last perform not by this keeper
     (
                 keeper_registries.keeper_index = ((CAST(upkeep_registrations.positioning_constant AS bit(32)) #
                                                    CAST($4 AS bit(32)))::int % keeper_registries.num_keepers)
@@ -143,7 +143,7 @@ WHERE
                 (upkeep_registrations.last_keeper_index != keeper_registries.keeper_index OR last_keeper_index IS NULL)
         )
    OR
-   -- buddy's turn AND last run by buddy so cover for them
+   -- next keeper's turn AND last perform was by next keeper so cover
     (
                     (keeper_registries.keeper_index + 1) % keeper_registries.num_keepers =
                     ((CAST(upkeep_registrations.positioning_constant AS bit(32)) #
@@ -170,12 +170,12 @@ WHERE
 	return upkeeps, err
 }
 
-// getBinaryOfFirstTurnInHead first calculates the first potential head for a turn. It then gets the hash for that head and converts it to binary
-func getBinaryOfFirstTurnInHead(blockNumber int64, registry Registry, head *types.Head) (string, error) {
+// binaryOfFirstHashInTurn first calculates the first potential head for a turn. It then gets the hash for that head and converts it to binary
+func binaryOfFirstHashInTurn(blockNumber int64, registry Registry, head *types.Head) (string, error) {
 	firstHeadInTurn := blockNumber - (blockNumber % int64(registry.BlockCountPerTurn))
-	firstHeadInTurnHash := head.HashAtHeight(firstHeadInTurn)
+	hashAtHeight := head.HashAtHeight(firstHeadInTurn)
 	bigInt := new(big.Int)
-	bigInt.SetString(firstHeadInTurnHash.Hex(), 0)
+	bigInt.SetString(hashAtHeight.Hex(), 0)
 	binaryString := fmt.Sprintf("%b", bigInt)
 	return binaryString, nil
 }
