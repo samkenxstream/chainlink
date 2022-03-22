@@ -183,7 +183,6 @@ func getBinaryOfFirstTurnInHead(blockNumber int64, registry Registry, head *type
 func loadUpkeepsRegistry(q pg.Queryer, upkeeps []UpkeepRegistration) error {
 	registryIDM := make(map[int64]*Registry)
 	var registryIDs []int64
-	// is this loop necessary when our previous query only selects a single registry
 	for _, upkeep := range upkeeps {
 		if _, exists := registryIDM[upkeep.RegistryID]; !exists {
 			registryIDM[upkeep.RegistryID] = new(Registry)

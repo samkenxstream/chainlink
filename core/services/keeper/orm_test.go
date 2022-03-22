@@ -331,11 +331,8 @@ func TestKeeperDB_EligibleUpkeeps_SkipIfLastPerformedByCurrentKeeper(t *testing.
 	cltest.AssertCount(t, db, "keeper_registries", 1)
 	cltest.AssertCount(t, db, "upkeep_registrations", 100)
 
-	parentHash := utils.NewHash()
-	h1 := evmtypes.NewHead(big.NewInt(21), utils.NewHash(), parentHash, 1000, utils.NewBigI(0))
-	firstHeadInTurn := h1.Number - (h1.Number % int64(registry.BlockCountPerTurn))
-	headParent := evmtypes.NewHead(big.NewInt(firstHeadInTurn), parentHash, utils.NewHash(), 1000, utils.NewBigI(0))
-	h1.Parent = &headParent
+	h1 := evmtypes.NewHead(big.NewInt(21), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h1, registry)
 
 	// if current keeper index = 0 and all upkeeps last perform was done by index = 0 then skip as it would not pass required turn taking
 	upkeep := keeper.UpkeepRegistration{}
@@ -359,11 +356,8 @@ func TestKeeperDB_EligibleUpkeeps_FirstTurn(t *testing.T) {
 	cltest.AssertCount(t, db, "keeper_registries", 1)
 	cltest.AssertCount(t, db, "upkeep_registrations", 100)
 
-	parentHash := utils.NewHash()
-	h1 := evmtypes.NewHead(big.NewInt(21), utils.NewHash(), parentHash, 1000, utils.NewBigI(0))
-	firstHeadInTurn := h1.Number - (h1.Number % int64(registry.BlockCountPerTurn))
-	headParent := evmtypes.NewHead(big.NewInt(firstHeadInTurn), parentHash, utils.NewHash(), 1000, utils.NewBigI(0))
-	h1.Parent = &headParent
+	h1 := evmtypes.NewHead(big.NewInt(21), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
+	putTurnBlockAsParent(&h1, registry)
 
 	// last keeper index is null to simulate a normal first run
 	listKpr0, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h1, 0) // someone eligible only kpr0 turn
@@ -437,7 +431,7 @@ func TestKeeperDB_SetLastRunHeightForUpkeepOnJob(t *testing.T) {
 	assertLastRunHeight(t, db, upkeep, 0, 0)
 }
 
-// turn taking algo needs the turn head hash to be in the history
+// helper function place turn head hash in the history
 func putTurnBlockAsParent(head *evmtypes.Head, registry keeper.Registry) {
 	firstHeadInTurn := head.Number - (head.Number % int64(registry.BlockCountPerTurn))
 	headParent := evmtypes.NewHead(big.NewInt(firstHeadInTurn), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
