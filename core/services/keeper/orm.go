@@ -51,7 +51,7 @@ func (korm ORM) Registries() ([]Registry, error) {
 // RegistryByContractAddress returns a single registry based on provided address
 func (korm ORM) RegistryByContractAddress(registryAddress ethkey.EIP55Address) (Registry, error) {
 	var registry Registry
-	err := korm.q.Get(&registry, `SELECT * FROM keeper_registries WHERE keeper_registries.contract_address = $1 LIMIT 1`, registryAddress)
+	err := korm.q.Get(&registry, `SELECT * FROM keeper_registries WHERE keeper_registries.contract_address = $1`, registryAddress)
 	return registry, errors.Wrap(err, "failed to get registry")
 }
 
