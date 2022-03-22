@@ -1,8 +1,8 @@
 package keeper_test
 
 import (
-	"fmt"
 	"math/big"
+	"sort"
 	"testing"
 	"time"
 
@@ -200,8 +200,8 @@ func TestKeeperDB_EligibleUpkeeps_BlockCountPerTurn(t *testing.T) {
 	upkeeps[3].LastRunBlockHeight = 59 // Run last turn, inside grace period (EXCLUDE)
 	upkeeps[4].LastRunBlockHeight = 61 // Run this turn, inside grace period (EXCLUDE)
 
-	for _, upkeep := range upkeeps {
-		err := orm.UpsertUpkeep(&upkeep)
+	for i := range upkeeps {
+		err := orm.UpsertUpkeep(&upkeeps[i])
 		require.NoError(t, err)
 	}
 
@@ -247,8 +247,9 @@ func TestKeeperDB_EligibleUpkeeps_GracePeriod(t *testing.T) {
 	upkeep3 := newUpkeep(registry, 2)
 	upkeep3.LastRunBlockHeight = 20
 
-	for _, upkeep := range [3]keeper.UpkeepRegistration{upkeep1, upkeep2, upkeep3} {
-		err := orm.UpsertUpkeep(&upkeep)
+	upkeepRegistrations := [3]keeper.UpkeepRegistration{upkeep1, upkeep2, upkeep3}
+	for i := range upkeepRegistrations {
+		err := orm.UpsertUpkeep(&upkeepRegistrations[i])
 		require.NoError(t, err)
 	}
 
@@ -297,6 +298,20 @@ func TestKeeperDB_EligibleUpkeeps_TurnsRandom(t *testing.T) {
 	list4, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h4, 0)
 	require.NoError(t, err)
 
+	// sort before compare
+	sort.Slice(list1, func(i, j int) bool {
+		return list1[i].UpkeepID < list1[j].UpkeepID
+	})
+	sort.Slice(list2, func(i, j int) bool {
+		return list2[i].UpkeepID < list2[j].UpkeepID
+	})
+	sort.Slice(list3, func(i, j int) bool {
+		return list3[i].UpkeepID < list3[j].UpkeepID
+	})
+	sort.Slice(list4, func(i, j int) bool {
+		return list4[i].UpkeepID < list4[j].UpkeepID
+	})
+
 	assert.NotEqual(t, list1, list2, "list1 vs list2")
 	assert.NotEqual(t, list1, list3, "list1 vs list3")
 	assert.NotEqual(t, list1, list4, "list1 vs list4")
@@ -323,10 +338,8 @@ func TestKeeperDB_EligibleUpkeeps_SkipIfLastPerformedByCurrentKeeper(t *testing.
 	h1.Parent = &headParent
 
 	// if current keeper index = 0 and all upkeeps last perform was done by index = 0 then skip as it would not pass required turn taking
-	r, err := db.Exec(`UPDATE upkeep_registrations SET last_keeper_index = 0 RETURNING *`)
-	require.NoError(t, err)
-	affected, _ := r.RowsAffected()
-	fmt.Println("UPDATE upkeep_registrations SET last_keeper_index = 0 rows affected: ", affected)
+	upkeep := keeper.UpkeepRegistration{}
+	require.NoError(t, db.Get(&upkeep, `UPDATE upkeep_registrations SET last_keeper_index = 0 RETURNING *`))
 	list0, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h1, 0) // none eligible
 	require.NoError(t, err)
 	require.Equal(t, 0, len(list0), "should be 0 as all last perform was done by current node")
@@ -352,14 +365,9 @@ func TestKeeperDB_EligibleUpkeeps_FirstTurn(t *testing.T) {
 	headParent := evmtypes.NewHead(big.NewInt(firstHeadInTurn), parentHash, utils.NewHash(), 1000, utils.NewBigI(0))
 	h1.Parent = &headParent
 
-	// switch last keeper index to null to simulate a normal run
-	r, err := db.Exec(`UPDATE upkeep_registrations SET last_keeper_index = NULL RETURNING *`)
-	require.NoError(t, err)
-	affected, _ := r.RowsAffected()
-	fmt.Println("UPDATE upkeep_registrations SET last_keeper_index = NULL rows affected: ", affected)
+	// last keeper index is null to simulate a normal first run
 	listKpr0, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h1, 0) // someone eligible only kpr0 turn
 	require.NoError(t, err)
-	fmt.Println(len(listKpr0))
 	require.NotEqual(t, 0, len(listKpr0), "kpr0 should have some eligible as a normal turn")
 }
 
@@ -423,9 +431,9 @@ func TestKeeperDB_SetLastRunHeightForUpkeepOnJob(t *testing.T) {
 	registry, j := cltest.MustInsertKeeperRegistry(t, db, orm, ethKeyStore, 0, 1, 20)
 	upkeep := cltest.MustInsertUpkeepForRegistry(t, db, config, registry)
 
-	orm.SetLastRunInfoForUpkeepOnJob(j.ID, upkeep.UpkeepID, 100, upkeep.Registry.FromAddress.Address())
+	require.NoError(t, orm.SetLastRunInfoForUpkeepOnJob(j.ID, upkeep.UpkeepID, 100, upkeep.Registry.FromAddress.Address()))
 	assertLastRunHeight(t, db, upkeep, 100, 0)
-	orm.SetLastRunInfoForUpkeepOnJob(j.ID, upkeep.UpkeepID, 0, upkeep.Registry.FromAddress.Address())
+	require.NoError(t, orm.SetLastRunInfoForUpkeepOnJob(j.ID, upkeep.UpkeepID, 0, upkeep.Registry.FromAddress.Address()))
 	assertLastRunHeight(t, db, upkeep, 0, 0)
 }
 
