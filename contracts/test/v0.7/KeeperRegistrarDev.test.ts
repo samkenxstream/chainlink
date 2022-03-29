@@ -75,6 +75,7 @@ describe('KeeperRegistrar', () => {
   const fallbackGasPrice = BigNumber.from(200)
   const fallbackLinkPrice = BigNumber.from(200000000)
   const keepersMustTakeTurns = true
+  const maxPerformGas = BigNumber.from(5000000)
   const minLINKJuels = BigNumber.from('1000000000000000000')
   const amount = BigNumber.from('5000000000000000000')
   const amount1 = BigNumber.from('6000000000000000000')
@@ -121,6 +122,7 @@ describe('KeeperRegistrar', () => {
         fallbackGasPrice,
         fallbackLinkPrice,
         keepersMustTakeTurns,
+        maxPerformGas,
       )
 
     mock = await upkeepMockFactory.deploy()

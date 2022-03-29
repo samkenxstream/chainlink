@@ -41,7 +41,6 @@ contract KeeperRegistryDev is
   address private constant IGNORE_ADDRESS = 0xFFfFfFffFFfffFFfFFfFFFFFffFFFffffFfFFFfF;
   bytes4 private constant CHECK_SELECTOR = KeeperCompatibleInterface.checkUpkeep.selector;
   bytes4 private constant PERFORM_SELECTOR = KeeperCompatibleInterface.performUpkeep.selector;
-  uint256 private constant CALL_GAS_MAX = 5_000_000;
   uint256 private constant CALL_GAS_MIN = 2_300;
   uint256 private constant CANCELATION_DELAY = 50;
   uint256 private constant CUSHION = 5_000;
@@ -60,6 +59,7 @@ contract KeeperRegistryDev is
   Config private s_config;
   uint256 private s_fallbackGasPrice; // not in config object for gas savings
   uint256 private s_fallbackLinkPrice; // not in config object for gas savings
+  uint32 private s_maxPerformGas; // not in config object as not settable outside constructor
   uint256 private s_expectedLinkBalance;
 
   LinkTokenInterface public immutable LINK;
@@ -72,6 +72,8 @@ contract KeeperRegistryDev is
    * @notice versions:
    * - KeeperRegistry 1.2.0: allow funding within performUpkeep
    *                       : add config for keeperMustTakeTurns
+   *                       : allow configurable registry maxPerformGas
+   *                       : add function to let admin change upkeep gas limit
    * - KeeperRegistry 1.1.0: added flatFeeMicroLink
    * - KeeperRegistry 1.0.0: initial release
    */
@@ -140,6 +142,7 @@ contract KeeperRegistryDev is
   event PayeeshipTransferRequested(address indexed keeper, address indexed from, address indexed to);
   event PayeeshipTransferred(address indexed keeper, address indexed from, address indexed to);
   event RegistrarChanged(address indexed from, address indexed to);
+  event UpkeepGasLimitSet(uint256 indexed id, uint96 gasLimit);
 
   /**
    * @param link address of the LINK Token
@@ -160,6 +163,7 @@ contract KeeperRegistryDev is
    * @param fallbackGasPrice gas price used if the gas price feed is stale
    * @param fallbackLinkPrice LINK price used if the LINK price feed is stale
    * @param keepersMustTakeTurns flag if true requires node performing Upkeep be different then previous
+   * @param maxPerformGas max executeGas allowed for an upkeep on this registry
    */
   constructor(
     address link,
@@ -173,11 +177,13 @@ contract KeeperRegistryDev is
     uint16 gasCeilingMultiplier,
     uint256 fallbackGasPrice,
     uint256 fallbackLinkPrice,
-    bool keepersMustTakeTurns
+    bool keepersMustTakeTurns,
+    uint32 maxPerformGas
   ) ConfirmedOwner(msg.sender) {
     LINK = LinkTokenInterface(link);
     LINK_ETH_FEED = AggregatorV3Interface(linkEthFeed);
     FAST_GAS_FEED = AggregatorV3Interface(fastGasFeed);
+    s_maxPerformGas = maxPerformGas;
 
     setConfig(
       paymentPremiumPPB,
@@ -210,7 +216,7 @@ contract KeeperRegistryDev is
   ) external override onlyOwnerOrRegistrar returns (uint256 id) {
     require(target.isContract(), "target is not a contract");
     require(gasLimit >= CALL_GAS_MIN, "min gas is 2300");
-    require(gasLimit <= CALL_GAS_MAX, "max gas is 5000000");
+    require(gasLimit <= s_maxPerformGas, "gasLimit exceeds registry maxPerformGas");
 
     id = s_upkeepCount;
     s_upkeep[id] = Upkeep({
@@ -309,8 +315,7 @@ contract KeeperRegistryDev is
    * @param id upkeep to fund
    * @param amount number of LINK to transfer
    */
-  function addFunds(uint256 id, uint96 amount) external override {
-    require(s_upkeep[id].maxValidBlocknumber == UINT64_MAX, "upkeep must be active");
+  function addFunds(uint256 id, uint96 amount) external override onlyActiveUpkeep(id) {
     s_upkeep[id].balance = s_upkeep[id].balance.add(amount);
     s_expectedLinkBalance = s_expectedLinkBalance.add(amount);
     LINK.transferFrom(msg.sender, address(this), amount);
@@ -344,8 +349,7 @@ contract KeeperRegistryDev is
    * @param id upkeep to withdraw funds from
    * @param to destination address for sending remaining funds
    */
-  function withdrawFunds(uint256 id, address to) external validateRecipient(to) {
-    require(s_upkeep[id].admin == msg.sender, "only callable by admin");
+  function withdrawFunds(uint256 id, address to) external validateRecipient(to) onlyUpkeepAdmin(id) {
     require(s_upkeep[id].maxValidBlocknumber <= block.number, "upkeep must be canceled");
 
     uint256 amount = s_upkeep[id].balance;
@@ -354,6 +358,20 @@ contract KeeperRegistryDev is
     emit FundsWithdrawn(id, amount, to);
 
     LINK.transfer(to, amount);
+  }
+
+  /**
+   * @notice allows the admin of an upkeep to modify gas limit
+   * @param id upkeep to be change the gas limit for
+   * @param gasLimit new gas limit for the upkeep
+   */
+  function setGasLimit(uint256 id, uint32 gasLimit) external override onlyActiveUpkeep(id) onlyUpkeepAdmin(id) {
+    require(gasLimit >= CALL_GAS_MIN, "min gas is 2300");
+    require(gasLimit <= s_maxPerformGas, "gasLimit exceeds registry maxPerformGas");
+
+    s_upkeep[id].executeGas = gasLimit;
+
+    emit UpkeepGasLimitSet(id, gasLimit);
   }
 
   /**
@@ -636,6 +654,13 @@ contract KeeperRegistryDev is
   }
 
   /**
+   * @notice getMaxPerformGas gets the max perform gas allowed on this registry
+   */
+  function getMaxPerformGas() external view returns (uint32) {
+    return s_maxPerformGas;
+  }
+
+  /**
    * @notice calculates the minimum balance required for an upkeep to remain eligible
    */
   function getMinBalanceForUpkeep(uint256 id) external view returns (uint96 minBalance) {
@@ -837,6 +862,22 @@ contract KeeperRegistryDev is
    */
   modifier validUpkeep(uint256 id) {
     validateUpkeep(id);
+    _;
+  }
+
+  /**
+   * @dev Reverts if called by anyone other than the admin of upkeep #id
+   */
+  modifier onlyUpkeepAdmin(uint256 id) {
+    require(msg.sender == s_upkeep[id].admin, "only callable by admin");
+    _;
+  }
+
+  /**
+   * @dev Reverts if called on a cancelled upkeep
+   */
+  modifier onlyActiveUpkeep(uint256 id) {
+    require(s_upkeep[id].maxValidBlocknumber == UINT64_MAX, "upkeep must be active");
     _;
   }
 

@@ -20,6 +20,8 @@ interface KeeperRegistryBaseInterface {
 
   function addFunds(uint256 id, uint96 amount) external;
 
+  function setGasLimit(uint256 id, uint32 gasLimit) external;
+
   function getUpkeep(uint256 id)
     external
     view
