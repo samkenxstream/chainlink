@@ -4,6 +4,7 @@
  * Once this is audited and finalised it will be copied to KeeperRegistrar
  */
 pragma solidity ^0.7.0;
+pragma abicoder v2;
 
 import "../interfaces/LinkTokenInterface.sol";
 import "../interfaces/KeeperRegistryInterface.sol";
@@ -22,6 +23,17 @@ import "../ConfirmedOwner.sol";
  * they can just listen to `RegistrationRequested` & `RegistrationApproved` events and know the status on registrations.
  */
 contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
+  /**
+   * DISABLED: No auto approvals, all new upkeeps should be approved manually.
+   * ENABLED_SENDER_ALLOWLIST: Auto approvals for allowed senders subject to rate limits. Manual for rest.
+   * ENABLED_ALL: Auto approvals for all new upkeeps subject to rate limits.
+   */
+  enum AutoApproveType {
+    DISABLED,
+    ENABLED_SENDER_ALLOWLIST,
+    ENABLED_ALL
+  }
+
   using SafeMath96 for uint96;
 
   bytes4 private constant REGISTER_REQUEST_SELECTOR = this.register.selector;
@@ -33,12 +45,13 @@ contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
 
   /**
    * @notice versions:
-   * - UpkeepRegistration 1.0.0: initial release
+   * - KeeperRegistrar 1.1.0: Add functionality for sender allowlist in auto approve
+   * - KeeperRegistrar 1.0.0: initial release
    */
-  string public constant override typeAndVersion = "KeeperRegistrar 1.0.0";
+  string public constant override typeAndVersion = "KeeperRegistrar 1.1.0";
 
   struct AutoApprovedConfig {
-    bool enabled;
+    AutoApproveType configType;
     uint16 allowedPerWindow;
     uint32 windowSizeInBlocks;
     uint64 windowStart;
@@ -51,6 +64,8 @@ contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
   }
 
   AutoApprovedConfig private s_config;
+  // Only applicable if s_config.configType is ENABLED_ADMIN_ALLOWLIST
+  mapping(address => bool) private s_autoApproveAllowedSenders;
   KeeperRegistryBaseInterface private s_keeperRegistry;
 
   event RegistrationRequested(
@@ -69,8 +84,10 @@ contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
 
   event RegistrationRejected(bytes32 indexed hash);
 
+  event AutoApproveAllowedSenderSet(address indexed senderAddress, bool allowed);
+
   event ConfigChanged(
-    bool enabled,
+    AutoApproveType configType,
     uint32 windowSizeInBlocks,
     uint16 allowedPerWindow,
     address keeperRegistry,
@@ -121,7 +138,7 @@ contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
     );
 
     AutoApprovedConfig memory config = s_config;
-    if (config.enabled && _underApprovalLimit(config)) {
+    if (_shouldAutoApprove(config)) {
       _incrementApprovedCount(config);
 
       _approve(name, upkeepContract, gasLimit, adminAddress, checkData, amount, hash);
@@ -165,20 +182,21 @@ contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
 
   /**
    * @notice owner calls this function to set if registration requests should be sent directly to the Keeper Registry
-   * @param enabled setting for auto-approve registrations
+   * @param configType setting for auto-approve registrations
+   *                   note: autoApproveAllowedSenders list persists across config changes irrespective of type
    * @param windowSizeInBlocks window size defined in number of blocks
    * @param allowedPerWindow number of registrations that can be auto approved in above window
    * @param keeperRegistry new keeper registry address
    */
   function setRegistrationConfig(
-    bool enabled,
+    AutoApproveType configType,
     uint32 windowSizeInBlocks,
     uint16 allowedPerWindow,
     address keeperRegistry,
     uint256 minLINKJuels
   ) external onlyOwner {
     s_config = AutoApprovedConfig({
-      enabled: enabled,
+      configType: configType,
       allowedPerWindow: allowedPerWindow,
       windowSizeInBlocks: windowSizeInBlocks,
       windowStart: 0,
@@ -187,7 +205,26 @@ contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
     s_minLINKJuels = minLINKJuels;
     s_keeperRegistry = KeeperRegistryBaseInterface(keeperRegistry);
 
-    emit ConfigChanged(enabled, windowSizeInBlocks, allowedPerWindow, keeperRegistry, minLINKJuels);
+    emit ConfigChanged(configType, windowSizeInBlocks, allowedPerWindow, keeperRegistry, minLINKJuels);
+  }
+
+  /**
+   * @notice owner calls this function to set allowlist status for senderAddress
+   * @param senderAddress senderAddress to set the allowlist status for
+   * @param allowed true if senderAddress needs to be added to allowlist, false if needs to be removed
+   */
+  function setAutoApproveAllowedSender(address senderAddress, bool allowed) external onlyOwner {
+    s_autoApproveAllowedSenders[senderAddress] = allowed;
+
+    emit AutoApproveAllowedSenderSet(senderAddress, allowed);
+  }
+
+  /**
+   * @notice read the allowlist status of senderAddress
+   * @param senderAddress address to read the allowlist status for
+   */
+  function getAutoApproveAllowedSender(address senderAddress) external view returns (bool) {
+    return s_autoApproveAllowedSenders[senderAddress];
   }
 
   /**
@@ -197,7 +234,7 @@ contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
     external
     view
     returns (
-      bool enabled,
+      AutoApproveType configType,
       uint32 windowSizeInBlocks,
       uint16 allowedPerWindow,
       address keeperRegistry,
@@ -208,7 +245,7 @@ contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
   {
     AutoApprovedConfig memory config = s_config;
     return (
-      config.enabled,
+      config.configType,
       config.windowSizeInBlocks,
       config.allowedPerWindow,
       address(s_keeperRegistry),
@@ -232,7 +269,7 @@ contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
    * @param data Payload of the transaction
    */
   function onTokenTransfer(
-    address, /* sender */
+    address sender,
     uint256 amount,
     bytes calldata data
   ) external onlyLINK permittedFunctionsForLINK(data) isActualAmount(amount, data) {
@@ -280,9 +317,15 @@ contract KeeperRegistrarDev is TypeAndVersionInterface, ConfirmedOwner {
   }
 
   /**
-   * @dev determine approval limits and check if in range
+   * @dev verify sender allowlist if needed and checks rate limits
    */
-  function _underApprovalLimit(AutoApprovedConfig memory config) private returns (bool) {
+  function _shouldAutoApprove(AutoApprovedConfig memory config) private returns (bool) {
+    if (config.configType == AutoApproveType.DISABLED) {
+      return false;
+    }
+    if (config.configType == AutoApproveType.ENABLED_SENDER_ALLOWLIST && (!s_autoApproveAllowedSenders[msg.sender])) {
+      return false;
+    }
     _resetWindowIfRequired(config);
     if (config.approvedInCurrentWindow < config.allowedPerWindow) {
       return true;
