@@ -1,12 +1,12 @@
 package keeper
 
 import (
+	"database/sql"
 	"fmt"
 	"math/big"
 	"math/rand"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/lib/pq"
 	"github.com/pkg/errors"
 	"github.com/smartcontractkit/sqlx"
@@ -135,22 +135,19 @@ WHERE
 		)
 	)
 	AND 
-   -- this keeper's turn AND last perform not by this keeper
     (
                 keeper_registries.keeper_index = ((CAST(upkeep_registrations.positioning_constant AS bit(32)) #
-                                                   CAST($4 AS bit(32)))::int % keeper_registries.num_keepers)
+                                                   CAST($4 AS bit(32)))::bigint % keeper_registries.num_keepers)
             AND
-                (upkeep_registrations.last_keeper_index != keeper_registries.keeper_index OR last_keeper_index IS NULL)
+                upkeep_registrations.last_keeper_index IS DISTINCT FROM keeper_registries.keeper_index
         )
    OR
-   -- next keeper's turn AND last perform was by next keeper so cover
     (
                     (keeper_registries.keeper_index + 1) % keeper_registries.num_keepers =
                     ((CAST(upkeep_registrations.positioning_constant AS bit(32)) #
-                      CAST($4 AS bit(32)))::int % keeper_registries.num_keepers)
+                      CAST($4 AS bit(32)))::bigint % keeper_registries.num_keepers)
             AND
-                    upkeep_registrations.last_keeper_index =
-                    (keeper_registries.keeper_index + 1) % keeper_registries.num_keepers
+                    upkeep_registrations.last_keeper_index IS NOT DISTINCT FROM (keeper_registries.keeper_index + 1) % keeper_registries.num_keepers
         )
 `
 		if err = tx.Select(&upkeeps, stmt, registryAddress, gracePeriod, blockNumber, binaryHash); err != nil {
@@ -214,14 +211,14 @@ WHERE registry_id = $1
 	return nextID, errors.Wrap(err, "LowestUnsyncedID failed")
 }
 
-func (korm ORM) SetLastRunInfoForUpkeepOnJob(jobID int32, upkeepID, height int64, from common.Address, qopts ...pg.QOpt) error {
+func (korm ORM) SetLastRunInfoForUpkeepOnJob(jobID int32, upkeepID, height int64, fromIndex sql.NullInt64, qopts ...pg.QOpt) error {
 	_, err := korm.q.WithOpts(qopts...).Exec(`
 UPDATE upkeep_registrations
 SET last_run_block_height = $1,
-    last_keeper_index = (SELECT keeper_index FROM keeper_registries WHERE from_address = $4)
+    last_keeper_index = $4
 WHERE upkeep_id = $2 AND
 registry_id = (
 	SELECT id FROM keeper_registries WHERE job_id = $3
-)`, height, upkeepID, jobID, from)
+)`, height, upkeepID, jobID, fromIndex)
 	return errors.Wrap(err, "SetLastRunInfoForUpkeepOnJob failed")
 }

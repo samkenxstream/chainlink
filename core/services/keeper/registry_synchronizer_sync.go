@@ -5,11 +5,15 @@ import (
 	"math/big"
 	"sync"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/pkg/errors"
 
 	"github.com/smartcontractkit/chainlink/core/services/keystore/keys/ethkey"
 	"github.com/smartcontractkit/chainlink/core/utils"
 )
+
+// KeeperList is a local lookup map that is refreshed every Registry sync.
+var KeeperList map[common.Address]int32
 
 func (rs *RegistrySynchronizer) fullSync() {
 	contractAddress := rs.job.KeeperSpec.ContractAddress
@@ -147,7 +151,10 @@ func (rs *RegistrySynchronizer) newRegistryFromChain() (Registry, error) {
 		return Registry{}, errors.Wrap(err, "failed to get keeper list")
 	}
 	keeperIndex := int32(-1)
+	// clear KeeperList
+	KeeperList = map[common.Address]int32{}
 	for idx, address := range keeperAddresses {
+		KeeperList[address] = int32(idx)
 		if address == fromAddress.Address() {
 			keeperIndex = int32(idx)
 		}
