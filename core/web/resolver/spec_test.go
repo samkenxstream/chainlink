@@ -614,6 +614,7 @@ func TestResolver_VRFSpec(t *testing.T) {
 						PublicKey:                pubKey,
 						RequestedConfsDelay:      10,
 						RequestTimeout:           24 * time.Hour,
+						ChunkSize:                25,
 					},
 				}, nil)
 			},
@@ -635,6 +636,7 @@ func TestResolver_VRFSpec(t *testing.T) {
 									requestTimeout
 									batchCoordinatorAddress
 									batchFulfillmentEnabled
+									chunkSize
 								}
 							}
 						}
@@ -656,7 +658,8 @@ func TestResolver_VRFSpec(t *testing.T) {
 							"requestedConfsDelay": 10,
 							"requestTimeout": "24h0m0s",
 							"batchCoordinatorAddress": "0x0ad9FE7a58216242a8475ca92F222b0640E26B63",
-							"batchFulfillmentEnabled": true
+							"batchFulfillmentEnabled": true,
+							"chunkSize": 25
 						}
 					}
 				}

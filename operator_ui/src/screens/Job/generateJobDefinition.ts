@@ -206,6 +206,7 @@ export const generateJobDefinition = (
           'requestedConfsDelay',
           'batchCoordinatorAddress',
           'batchFulfillmentEnabled',
+          'chunkSize',
         ),
         ...extractObservationSourceField(job),
       }

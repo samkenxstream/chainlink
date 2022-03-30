@@ -88,6 +88,7 @@ const JOB_PAYLOAD__SPEC = gql`
       requestedConfsDelay
       batchCoordinatorAddress
       batchFulfillmentEnabled
+      chunkSize
     }
     ... on BlockhashStoreSpec {
       coordinatorV1Address

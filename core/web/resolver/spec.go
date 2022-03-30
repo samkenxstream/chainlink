@@ -667,6 +667,11 @@ func (r *VRFSpecResolver) BatchFulfillmentEnabled() bool {
 	return r.spec.BatchFulfillmentEnabled
 }
 
+// ChunkSize resolves the spec's chunk size.
+func (r *VRFSpecResolver) ChunkSize() int32 {
+	return int32(r.spec.ChunkSize)
+}
+
 type WebhookSpecResolver struct {
 	spec job.WebhookSpec
 }

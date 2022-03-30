@@ -103,6 +103,7 @@ type VRFSpec {
     requestTimeout: String!
     batchCoordinatorAddress: String
     batchFulfillmentEnabled: Boolean!
+    chunkSize: Int!
 }
 
 type WebhookSpec {

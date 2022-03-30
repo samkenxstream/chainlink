@@ -57,8 +57,13 @@ func ValidatedVRFSpec(tomlString string) (job.Job, error) {
 	if spec.RequestTimeout == 0 {
 		spec.RequestTimeout = 24 * time.Hour
 	}
+
 	if spec.BatchFulfillmentEnabled && spec.BatchCoordinatorAddress == nil {
 		return jb, errors.Wrap(ErrKeyNotSet, "batch coordinator address must be provided if batchFulfillmentEnabled = true")
+	}
+
+	if spec.ChunkSize == 0 {
+		spec.ChunkSize = 20
 	}
 
 	var foundVRFTask bool

@@ -286,6 +286,7 @@ type VRFSpec struct {
 	CreatedAt                time.Time             `json:"createdAt"`
 	UpdatedAt                time.Time             `json:"updatedAt"`
 	EVMChainID               *utils.Big            `json:"evmChainID"`
+	ChunkSize                uint32                `json:"chunkSize"`
 }
 
 func NewVRFSpec(spec *job.VRFSpec) *VRFSpec {
@@ -300,6 +301,7 @@ func NewVRFSpec(spec *job.VRFSpec) *VRFSpec {
 		CreatedAt:                spec.CreatedAt,
 		UpdatedAt:                spec.UpdatedAt,
 		EVMChainID:               spec.EVMChainID,
+		ChunkSize:                spec.ChunkSize,
 	}
 }
 
