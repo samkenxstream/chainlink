@@ -55,7 +55,7 @@ contract CronUpkeepDelegate {
    * @param start the starting id to check (inclusive)
    * @param end the ending id to check (exclusive)
    * @return upkeepNeeded signals if upkeep is needed, performData is an abi encoding
-   * of the id and "next tick" of the elligible cron job
+   * of the id and "next tick" of the eligible cron job
    */
   function checkInRange(uint256 start, uint256 end) private view returns (bool, bytes memory) {
     uint256 id;
