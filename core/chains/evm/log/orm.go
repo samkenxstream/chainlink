@@ -117,33 +117,41 @@ func (o *orm) MarkBroadcastConsumed(blockHash common.Hash, blockNumber uint64, l
 	return errors.Wrap(err, "failed to mark log broadcast as consumed")
 }
 
+// MarkBroadcastsConsumed marks many broadcasts as consumed.
+// The lengths of all the provided slices must be equal, otherwise an error is returned.
 func (o *orm) MarkBroadcastsConsumed(blockHashes []common.Hash, blockNumbers []uint64, logIndexes []uint, jobIDs []int32, qopts ...pg.QOpt) error {
-	q := o.q.WithOpts(qopts...)
+	if len(blockHashes) != len(blockNumbers) || len(blockNumbers) != len(logIndexes) || len(logIndexes) != len(jobIDs) {
+		return fmt.Errorf("all arg slice lengths must be equal, got: %d %d %d %d",
+			len(blockHashes), len(blockNumbers), len(logIndexes), len(jobIDs),
+		)
+	}
+
+	type input struct {
+		BlockHash   common.Hash `db:"blockHash"`
+		BlockNumber uint64      `db:"blockNumber"`
+		LogIndex    uint        `db:"logIndex"`
+		JobID       int32       `db:"jobID"`
+		ChainID     utils.Big   `db:"chainID"`
+	}
+	inputs := make([]input, len(blockHashes))
 	query := `
 INSERT INTO log_broadcasts (block_hash, block_number, log_index, job_id, created_at, updated_at, consumed, evm_chain_id)
-VALUES 
-`
-	counter := 1
-	var args []interface{}
-	for i := range blockHashes {
-		query += fmt.Sprintf(
-			"($%d, $%d, $%d, $%d, NOW(), NOW(), true, $%d),",
-			counter,
-			counter+1,
-			counter+2,
-			counter+3,
-			counter+4,
-		)
-		args = append(args, blockHashes[i], blockNumbers[i], logIndexes[i], jobIDs[i], o.evmChainID)
-		counter += 5
-	}
-	query = query[:len(query)-1] // remove trailing comma
-	query += `
+VALUES (:blockHash, :blockNumber, :logIndex, :jobID, NOW(), NOW(), true, :chainID)
 ON CONFLICT (job_id, block_hash, log_index, evm_chain_id) DO UPDATE
-SET consumed = true, updated_at = NOW()
+SET consumed = true, updated_at = NOW();
 	`
-	err := q.ExecQ(query, args...)
-	return errors.Wrap(err, "failed to mark log broadcasts as consumed")
+	for i := range blockHashes {
+		inputs[i] = input{
+			BlockHash:   blockHashes[i],
+			BlockNumber: blockNumbers[i],
+			LogIndex:    logIndexes[i],
+			JobID:       jobIDs[i],
+			ChainID:     o.evmChainID,
+		}
+	}
+	q := o.q.WithOpts(qopts...)
+	_, err := q.NamedExec(query, inputs)
+	return errors.Wrap(err, "mark broadcasts consumed")
 }
 
 // MarkBroadcastsUnconsumed implements the ORM interface.

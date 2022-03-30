@@ -438,14 +438,14 @@ schemaVersion = 1
 name = "vrf job"
 externalJobID = "00000000-0000-0000-0000-0000000000001"
 coordinatorAddress = "0x0000000000000000000000000000000000000000"
-batchCoordinatorAddress = "0x0000000000000000000000000000000000000000"
-batchFulfillmentEnabled = true
 evmChainID = "42"
 fromAddresses = [ "0x3cCad4715152693fE3BC4460591e3D3Fbd071b42" ]
 minIncomingConfirmations = 6
 pollPeriod = "10s"
 publicKey = "0x92594ee04c179eb7d439ff1baacd98b81a7d7a6ed55c86ca428fa025bd9c914301"
 requestedConfsDelay = 0
+batchCoordinatorAddress = "0x0000000000000000000000000000000000000000"
+batchFulfillmentEnabled = true
 observationSource = """
     fetch    [type=http method=POST url="http://localhost:8001" requestData="{\\\\"hi\\\\": \\\\"hello\\\\"}"];
     parse    [type=jsonparse path="data,result"];
