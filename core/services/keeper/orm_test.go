@@ -1,6 +1,7 @@
 package keeper_test
 
 import (
+	"database/sql"
 	"math/big"
 	"sort"
 	"testing"
@@ -290,7 +291,7 @@ func TestKeeperDB_EligibleUpkeeps_TurnsRandom(t *testing.T) {
 	cltest.AssertCount(t, db, "keeper_registries", 1)
 	cltest.AssertCount(t, db, "upkeep_registrations", 10)
 
-	// 3 keepers 10 block turns would make 20 and 50 the same bucket via the old way but now should be different every turn
+	// 3 keepers 10 block turns should be different every turn
 	h1 := evmtypes.NewHead(big.NewInt(20), utils.NewHash(), utils.NewHash(), 1000, utils.NewBigI(0))
 	putTurnBlockAsParent(&h1, registry)
 	list1, err := orm.EligibleUpkeepsForRegistry(registry.ContractAddress, &h1, 0)
@@ -438,9 +439,13 @@ func TestKeeperDB_SetLastRunHeightForUpkeepOnJob(t *testing.T) {
 	registry, j := cltest.MustInsertKeeperRegistry(t, db, orm, ethKeyStore, 0, 1, 20)
 	upkeep := cltest.MustInsertUpkeepForRegistry(t, db, config, registry)
 
-	require.NoError(t, orm.SetLastRunInfoForUpkeepOnJob(j.ID, upkeep.UpkeepID, 100, upkeep.Registry.FromAddress.Address()))
+	lastKeeperIndex := sql.NullInt64{
+		Int64: int64(upkeep.Registry.KeeperIndex),
+		Valid: true,
+	}
+	require.NoError(t, orm.SetLastRunInfoForUpkeepOnJob(j.ID, upkeep.UpkeepID, 100, lastKeeperIndex))
 	assertLastRunHeight(t, db, upkeep, 100, 0)
-	require.NoError(t, orm.SetLastRunInfoForUpkeepOnJob(j.ID, upkeep.UpkeepID, 0, upkeep.Registry.FromAddress.Address()))
+	require.NoError(t, orm.SetLastRunInfoForUpkeepOnJob(j.ID, upkeep.UpkeepID, 0, lastKeeperIndex))
 	assertLastRunHeight(t, db, upkeep, 0, 0)
 }
 
