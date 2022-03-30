@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 
 	"github.com/pkg/errors"
@@ -24,6 +25,7 @@ type ORM interface {
 	StoreRun(run *Run, qopts ...pg.QOpt) (restart bool, err error)
 	UpdateTaskRunResult(taskID uuid.UUID, result Result) (run Run, start bool, err error)
 	InsertFinishedRun(run *Run, saveSuccessfulTaskRuns bool, qopts ...pg.QOpt) (err error)
+	InsertFinishedRuns(run []*Run, saveSuccessfulTaskRuns bool, qopts ...pg.QOpt) (err error)
 	DeleteRunsOlderThan(context.Context, time.Duration) error
 	FindRun(id int64) (Run, error)
 	GetAllRuns() ([]Run, error)
@@ -221,10 +223,108 @@ func (o *orm) UpdateTaskRunResult(taskID uuid.UUID, result Result) (run Run, sta
 	return run, start, err
 }
 
-// If saveSuccessfulTaskRuns = false, we only save errored runs.
-// That way if the job is run frequently (such as OCR) we avoid saving a large number of successful task runs
-// which do not provide much value.
-func (o *orm) InsertFinishedRun(run *Run, saveSuccessfulTaskRuns bool, qopts ...pg.QOpt) (err error) {
+// InsertFinishedRuns inserts all the given runs into the database.
+func (o *orm) InsertFinishedRuns(runs []*Run, saveSuccessfulTaskRuns bool, qopts ...pg.QOpt) error {
+	pipelineRunsQuery := `
+INSERT INTO pipeline_runs (pipeline_spec_id, meta, all_errors, fatal_errors, inputs, outputs, created_at, finished_at, state)
+VALUES 
+	`
+	var (
+		pipelineRunsArgs []interface{}
+		pipelineCounter  = 1
+	)
+	for _, run := range runs {
+		if err := o.checkFinishedRun(run, saveSuccessfulTaskRuns); err != nil {
+			return errors.Wrap(err, "finished run check")
+		}
+		pipelineRunsQuery += fmt.Sprintf(
+			"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d),",
+			pipelineCounter,   // pipeline spec id
+			pipelineCounter+1, // meta
+			pipelineCounter+2, // all errors
+			pipelineCounter+3, // fatal errors
+			pipelineCounter+4, // inputs
+			pipelineCounter+5, // outputs
+			pipelineCounter+6, // created at
+			pipelineCounter+7, // finished at
+			pipelineCounter+8, // state
+		)
+		pipelineRunsArgs = append(pipelineRunsArgs, run.PipelineSpecID, run.Meta, run.AllErrors, run.FatalErrors, run.Inputs, run.Outputs, run.CreatedAt, run.FinishedAt, run.State)
+		pipelineCounter += 9
+	}
+	pipelineRunsQuery = pipelineRunsQuery[:len(pipelineRunsQuery)-1] // remove trailing comma
+	pipelineRunsQuery += `
+RETURNING id;
+	`
+
+	q := o.q.WithOpts(qopts...)
+	err := q.Transaction(func(tx pg.Queryer) error {
+		var runIDs []int64
+		rows, errQ := tx.Queryx(pipelineRunsQuery, pipelineRunsArgs...)
+		if errQ != nil {
+			return errors.Wrap(errQ, "inserting finished pipeline runs")
+		}
+		for rows.Next() {
+			var runID int64
+			if errS := rows.Scan(&runID); errS != nil {
+				return errors.Wrap(errS, "scanning pipeline runs id row")
+			}
+			runIDs = append(runIDs, runID)
+		}
+
+		for i, run := range runs {
+			for j := range run.PipelineTaskRuns {
+				run.PipelineTaskRuns[j].PipelineRunID = runIDs[i]
+			}
+		}
+
+		pipelineTaskRunsQuery := `
+INSERT INTO pipeline_task_runs (pipeline_run_id, id, type, index, output, error, dot_id, created_at, finished_at)
+VALUES 
+	`
+		var (
+			pipelineTaskRunsArgs []interface{}
+			pipelineTaskCounter  = 1
+		)
+		for _, run := range runs {
+			if !saveSuccessfulTaskRuns && !run.HasErrors() {
+				continue
+			}
+			for _, taskRun := range run.PipelineTaskRuns {
+				pipelineTaskRunsQuery += fmt.Sprintf(
+					"($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d),",
+					pipelineTaskCounter,   // pipeline run id
+					pipelineTaskCounter+1, // id
+					pipelineTaskCounter+2, // type
+					pipelineTaskCounter+3, // index
+					pipelineTaskCounter+4, // output
+					pipelineTaskCounter+5, // error
+					pipelineTaskCounter+6, // dot id
+					pipelineTaskCounter+7, // created at
+					pipelineTaskCounter+8, // finished at
+				)
+				pipelineTaskRunsArgs = append(pipelineTaskRunsArgs,
+					taskRun.PipelineRunID,
+					taskRun.ID,
+					taskRun.Type,
+					taskRun.Index,
+					taskRun.Output,
+					taskRun.Error,
+					taskRun.DotID,
+					taskRun.CreatedAt,
+					taskRun.FinishedAt,
+				)
+				pipelineTaskCounter += 9
+			}
+		}
+		pipelineTaskRunsQuery = pipelineTaskRunsQuery[:len(pipelineTaskRunsQuery)-1] // remove trailing comma
+		_, errE := tx.Exec(pipelineTaskRunsQuery, pipelineTaskRunsArgs...)
+		return errors.Wrap(errE, "inserting pipeline task runs")
+	})
+	return errors.Wrap(err, "InsertFinishedRuns failed")
+}
+
+func (o *orm) checkFinishedRun(run *Run, saveSuccessfulTaskRuns bool) error {
 	if run.CreatedAt.IsZero() {
 		return errors.New("run.CreatedAt must be set")
 	}
@@ -236,6 +336,16 @@ func (o *orm) InsertFinishedRun(run *Run, saveSuccessfulTaskRuns bool, qopts ...
 	}
 	if len(run.PipelineTaskRuns) == 0 && (saveSuccessfulTaskRuns || run.HasErrors()) {
 		return errors.New("must provide task run results")
+	}
+	return nil
+}
+
+// If saveSuccessfulTaskRuns = false, we only save errored runs.
+// That way if the job is run frequently (such as OCR) we avoid saving a large number of successful task runs
+// which do not provide much value.
+func (o *orm) InsertFinishedRun(run *Run, saveSuccessfulTaskRuns bool, qopts ...pg.QOpt) (err error) {
+	if err = o.checkFinishedRun(run, saveSuccessfulTaskRuns); err != nil {
+		return err
 	}
 
 	q := o.q.WithOpts(qopts...)

@@ -653,6 +653,20 @@ func (r *VRFSpecResolver) RequestTimeout() string {
 	return r.spec.RequestTimeout.String()
 }
 
+// BatchCoordinatorAddress resolves the spec's batch coordinator address.
+func (r *VRFSpecResolver) BatchCoordinatorAddress() *string {
+	if r.spec.BatchCoordinatorAddress == nil {
+		return nil
+	}
+	addr := r.spec.BatchCoordinatorAddress.String()
+	return &addr
+}
+
+// BatchFulfillmentEnabled resolves the spec's batch fulfillment enabled flag.
+func (r *VRFSpecResolver) BatchFulfillmentEnabled() bool {
+	return r.spec.BatchFulfillmentEnabled
+}
+
 type WebhookSpecResolver struct {
 	spec job.WebhookSpec
 }

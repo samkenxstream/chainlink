@@ -276,6 +276,8 @@ func NewCronSpec(spec *job.CronSpec) *CronSpec {
 }
 
 type VRFSpec struct {
+	BatchCoordinatorAddress  *ethkey.EIP55Address  `json:"batchCoordinatorAddress"`
+	BatchFulfillmentEnabled  bool                  `json:"batchFulfillmentEnabled"`
 	CoordinatorAddress       ethkey.EIP55Address   `json:"coordinatorAddress"`
 	PublicKey                secp256k1.PublicKey   `json:"publicKey"`
 	FromAddresses            []ethkey.EIP55Address `json:"fromAddresses"`
@@ -288,6 +290,8 @@ type VRFSpec struct {
 
 func NewVRFSpec(spec *job.VRFSpec) *VRFSpec {
 	return &VRFSpec{
+		BatchCoordinatorAddress:  spec.BatchCoordinatorAddress,
+		BatchFulfillmentEnabled:  spec.BatchFulfillmentEnabled,
 		CoordinatorAddress:       spec.CoordinatorAddress,
 		PublicKey:                spec.PublicKey,
 		FromAddresses:            spec.FromAddresses,

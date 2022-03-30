@@ -21,6 +21,7 @@ import (
 	"github.com/smartcontractkit/chainlink/core/chains/evm/txmgr"
 	evmtypes "github.com/smartcontractkit/chainlink/core/chains/evm/types"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/aggregator_v3_interface"
+	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/batch_vrf_coordinator_v2"
 	"github.com/smartcontractkit/chainlink/core/internal/gethwrappers/generated/vrf_coordinator_v2"
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/null"
@@ -46,6 +47,10 @@ const (
 		6685 // Positive static costs of argument encoding etc. note that it varies by +/- x*12 for every x bytes of non-zero data in the proof.
 )
 
+var (
+	batchCoordinatorV2ABI = evmtypes.MustGetABI(batch_vrf_coordinator_v2.BatchVRFCoordinatorV2ABI)
+)
+
 type pendingRequest struct {
 	confirmedAtBlock uint64
 	req              *vrf_coordinator_v2.VRFCoordinatorV2RandomWordsRequested
@@ -61,7 +66,10 @@ type listenerV2 struct {
 	chainID        *big.Int
 	logBroadcaster log.Broadcaster
 	txm            txmgr.TxManager
-	coordinator    *vrf_coordinator_v2.VRFCoordinatorV2
+
+	coordinator      *vrf_coordinator_v2.VRFCoordinatorV2
+	batchCoordinator *batch_vrf_coordinator_v2.BatchVRFCoordinatorV2
+
 	pipelineRunner pipeline.Runner
 	job            job.Job
 	q              pg.Q
@@ -307,11 +315,239 @@ func (a fulfilledReqV2) Compare(b heaps.Item) int {
 	}
 }
 
+func (lsn *listenerV2) processRequestsPerSubBatch(
+	subID uint64,
+	startBalance *big.Int,
+	reqs []pendingRequest,
+) map[string]struct{} {
+	start := time.Now()
+	var processed = make(map[string]struct{})
+	startBalanceNoReserveLink, err := MaybeSubtractReservedLink(
+		lsn.l, lsn.q, startBalance, lsn.chainID.Uint64(), subID)
+	if err != nil {
+		lsn.l.Errorw("Couldn't get reserved LINK for subscription", "sub", reqs[0].req.SubId)
+		return processed
+	}
+
+	// Base the max gas for a batch on the max gas limit for a single callback.
+	// Since the max gas limit for a single callback is usually quite large already,
+	// we probably don't want to exceed it too much so that we can reliably get
+	// batch fulfillments included, while also making sure that the biggest gas guzzler
+	// callbacks are included.
+	config, err := lsn.coordinator.GetConfig(nil)
+	if err != nil {
+		lsn.l.Errorw("Couldn't get config from coordinator", "err", err)
+		return processed
+	}
+	batchMaxGas := uint64(float64(config.MaxGasLimit) * 1.15)
+
+	lggr := lsn.l.With(
+		"subID", reqs[0].req.SubId,
+		"reqs", len(reqs),
+		"startBalance", startBalance.String(),
+		"startBalanceNoReservedLink", startBalanceNoReserveLink.String(),
+		"batchMaxGas", batchMaxGas,
+	)
+	lggr.Infow("Processing requests for subscription with batching")
+
+	// Group as many requests as we can that can fit inside the batchMaxGas.
+	// We simulate each fulfillment separately before enqueuing a batch fulfillment.
+	i := 0
+	for i < len(reqs) {
+		fromAddress, err := lsn.gethks.GetRoundRobinAddress(lsn.chainID, lsn.fromAddresses()...)
+		if err != nil {
+			lggr.Errorw("Couldn't get next from address - is keystore locked or no keys available?", "err", err)
+			return processed
+		}
+		maxGasPriceWei := lsn.cfg.KeySpecificMaxGasPriceWei(fromAddress)
+
+		var (
+			proofs        []batch_vrf_coordinator_v2.VRFTypesProof
+			commitments   []batch_vrf_coordinator_v2.VRFTypesRequestCommitment
+			totalGasLimit uint64
+			runs          []*pipeline.Run
+			reqIDs        []*big.Int
+			lbs           []log.Broadcast
+			maxLinks      []interface{}
+		)
+		for ; i < len(reqs); i++ {
+			req := reqs[i]
+			vrfRequest := req.req
+			rlog := lggr.With(
+				"reqID", vrfRequest.RequestId.String(),
+				"txHash", vrfRequest.Raw.TxHash,
+				"maxGasPrice", maxGasPriceWei.String(),
+				"fromAddress", fromAddress)
+
+			// This check to see if the log was consumed needs to be in the same
+			// goroutine as the mark consumed to avoid processing duplicates.
+			consumed, errConsumed := lsn.logBroadcaster.WasAlreadyConsumed(req.lb)
+			if errConsumed != nil {
+				// Do not process for now, retry on next iteration.
+				rlog.Errorw("Could not determine if log was already consumed", "err", errConsumed)
+				continue
+			} else if consumed {
+				processed[vrfRequest.RequestId.String()] = struct{}{}
+				continue
+			}
+
+			// Check if we can ignore the request due to it's age.
+			if time.Now().UTC().Sub(req.utcTimestamp) >= lsn.job.VRFSpec.RequestTimeout {
+				rlog.Infow("Request too old, dropping it")
+				lsn.markLogAsConsumed(req.lb)
+				processed[vrfRequest.RequestId.String()] = struct{}{}
+				incDroppedReqs(lsn.job.Name.ValueOrZero(), lsn.job.ExternalJobID, v2, reasonAge)
+				continue
+			}
+
+			// Check if the vrf req has already been fulfilled.
+			// Pass max(request.BlockNumber, currentBlockNumber) to the call to ensure we get
+			// the latest state or an error.
+			// This is to avoid a race condition where a request commitment has been written on-chain
+			// but has not been synced fully on the entire network. GetCommitment will return an empty
+			// byte array in that case, and we would think that the request is fulfilled when it actually
+			// isn't.
+			reqBlockNumber := new(big.Int).SetUint64(vrfRequest.Raw.BlockNumber)
+			currBlock := new(big.Int).SetUint64(lsn.getLatestHead())
+			m := bigmath.Max(reqBlockNumber, currBlock)
+			callback, errCb := lsn.coordinator.GetCommitment(&bind.CallOpts{
+				BlockNumber: m,
+			}, vrfRequest.RequestId)
+			if errCb != nil {
+				rlog.Errorw("Unable to check if already fulfilled, processing anyways", "err", errCb)
+			} else if utils.IsEmpty(callback[:]) {
+				// If seedAndBlockNumber is zero then the response has been fulfilled
+				// and we should skip it
+				rlog.Infow("Request already fulfilled", "callback", callback)
+				lsn.markLogAsConsumed(req.lb)
+				processed[vrfRequest.RequestId.String()] = struct{}{}
+				continue
+			}
+			// Run the pipeline to determine the max link that could be billed at maxGasPrice.
+			// The ethcall will error if there is currently insufficient balance onchain.
+			simResult, errG := lsn.simulateFulfillment(maxGasPriceWei, req, rlog)
+			if errG != nil {
+				rlog.Warnw("Unable to get max link for fulfillment, skipping request", "err", errG)
+				continue
+			}
+			if startBalanceNoReserveLink.Cmp(simResult.maxLink) < 0 {
+				// Insufficient funds, have to wait for a user top up
+				// leave it unprocessed for now
+				rlog.Infow("Insufficient link balance to fulfill a request, breaking", "maxLink", simResult.maxLink)
+				break
+			}
+
+			// check if we've exceeded the max gas limit on the batch.
+			// if we have, we should break here and re-process this request in the next
+			// batch.
+			if (totalGasLimit + simResult.estimateGasLimit) > batchMaxGas {
+				break
+			}
+
+			proofs = append(proofs, batch_vrf_coordinator_v2.VRFTypesProof(simResult.proof))
+			commitments = append(commitments, batch_vrf_coordinator_v2.VRFTypesRequestCommitment(simResult.reqCommitment))
+			runs = append(runs, &simResult.run)
+			reqIDs = append(reqIDs, vrfRequest.RequestId)
+			lbs = append(lbs, req.lb)
+			maxLinks = append(maxLinks, simResult.maxLink)
+			totalGasLimit += simResult.estimateGasLimit
+
+			startBalanceNoReserveLink.Sub(startBalanceNoReserveLink, simResult.maxLink)
+		}
+
+		// If we didn't enqueue anything into any of the slices
+		// then we broke out of the above loop due to out of funds.
+		// Break out of this outer loop since there's nothing left to do.
+		if len(proofs) == 0 {
+			lggr.Info("Nothing left to process in batch")
+			break
+		}
+
+		// Enqueue a single batch tx for requests that we're able to fulfill based on whether
+		// they passed simulation or not.
+		payload, err := batchCoordinatorV2ABI.Pack("fulfillRandomWords", proofs, commitments)
+		if err != nil {
+			// should never happen
+			lggr.Errorw("Failed to pack batch fulfillRandomWords payload",
+				"err", err, "proofs", proofs, "commitments", commitments)
+			continue
+		}
+
+		// Bump the total gas limit by a bit so that we account for the overhead of the batch
+		// contract's calling.
+		totalGasLimitBumped := uint64(float64(totalGasLimit) * 1.15)
+		lggr.Infow("Enqueueing batch fulfillment",
+			"numRequestsInBatch", len(reqIDs),
+			"requestIDs", reqIDs,
+			"totalGasLimit", totalGasLimit,
+			"linkBalance", startBalanceNoReserveLink,
+			"totalGasLimitBumped", totalGasLimitBumped,
+		)
+		err = lsn.q.Transaction(func(tx pg.Queryer) error {
+			if err = lsn.pipelineRunner.InsertFinishedRuns(runs, true, pg.WithQueryer(tx)); err != nil {
+				return errors.Wrap(err, "inserting finished pipeline runs")
+			}
+
+			if err = lsn.logBroadcaster.MarkManyConsumed(lbs, pg.WithQueryer(tx)); err != nil {
+				return errors.Wrap(err, "mark logs consumed")
+			}
+
+			maxLinkStr := bigmath.Accumulate(maxLinks).String()
+			reqIDHashes := []common.Hash{}
+			for _, reqID := range reqIDs {
+				reqIDHashes = append(reqIDHashes, common.BytesToHash(reqID.Bytes()))
+			}
+			_, err = lsn.txm.CreateEthTransaction(txmgr.NewTx{
+				FromAddress:      fromAddress,
+				ToAddress:        lsn.batchCoordinator.Address(),
+				EncodedPayload:   payload,
+				GasLimit:         totalGasLimitBumped,
+				MinConfirmations: null.Uint32From(uint32(lsn.cfg.MinRequiredOutgoingConfirmations())),
+				Strategy:         txmgr.NewSendEveryStrategy(),
+				Meta: &txmgr.EthTxMeta{
+					RequestIDs: reqIDHashes,
+					MaxLink:    &maxLinkStr,
+					SubID:      &subID,
+				},
+				// TODO: implement checker for batches.
+				// Checker: txmgr.TransmitCheckerSpec{
+				// 	CheckerType:           txmgr.TransmitCheckerTypeVRFV2,
+				// 	VRFCoordinatorAddress: lsn.coordinator.Address(),
+				// },,
+			}, pg.WithQueryer(tx))
+
+			return errors.Wrap(err, "create batch fulfillment eth transaction")
+		})
+		if err != nil {
+			lggr.Errorw("Error enqueuing batch fulfillments, requeuing requests", "err", err)
+			continue
+		}
+
+		// mark requests as processed since the fulfillment has been successfully enqueued
+		// to the txm.
+		for _, reqID := range reqIDs {
+			processed[reqID.String()] = struct{}{}
+			incProcessedReqs(lsn.job.Name.ValueOrZero(), lsn.job.ExternalJobID, v2)
+		}
+	}
+
+	lggr.Infow("Finished processing for sub",
+		"total reqs", len(reqs),
+		"total processed", len(processed),
+		"total unique", uniqueReqs(reqs),
+		"time", time.Since(start).String())
+	return processed
+}
+
 func (lsn *listenerV2) processRequestsPerSub(
 	subID uint64,
 	startBalance *big.Int,
 	reqs []pendingRequest,
 ) map[string]struct{} {
+	if lsn.job.VRFSpec.BatchFulfillmentEnabled && lsn.batchCoordinator != nil {
+		return lsn.processRequestsPerSubBatch(subID, startBalance, reqs)
+	}
+
 	start := time.Now()
 	var processed = make(map[string]struct{})
 	startBalanceNoReserveLink, err := MaybeSubtractReservedLink(
@@ -395,33 +631,33 @@ func (lsn *listenerV2) processRequestsPerSub(
 		}
 		// Run the pipeline to determine the max link that could be billed at maxGasPrice.
 		// The ethcall will error if there is currently insufficient balance onchain.
-		maxLink, run, payload, gaslimit, err := lsn.getMaxLinkForFulfillment(maxGasPriceWei, req, rlog)
+		simResult, err := lsn.simulateFulfillment(maxGasPriceWei, req, rlog)
 		if err != nil {
 			rlog.Warnw("Unable to get max link for fulfillment, skipping request", "err", err)
 			continue
 		}
-		if startBalanceNoReserveLink.Cmp(maxLink) < 0 {
+		if startBalanceNoReserveLink.Cmp(simResult.maxLink) < 0 {
 			// Insufficient funds, have to wait for a user top up
 			// leave it unprocessed for now
-			rlog.Infow("Insufficient link balance to fulfill a request, breaking", "maxLink", maxLink)
+			rlog.Infow("Insufficient link balance to fulfill a request, breaking", "maxLink", simResult.maxLink)
 			break
 		}
 		rlog.Infow("Enqueuing fulfillment")
 		// We have enough balance to service it, lets enqueue for txm
 		err = lsn.q.Transaction(func(tx pg.Queryer) error {
-			if err = lsn.pipelineRunner.InsertFinishedRun(&run, true, pg.WithQueryer(tx)); err != nil {
+			if err = lsn.pipelineRunner.InsertFinishedRun(&simResult.run, true, pg.WithQueryer(tx)); err != nil {
 				return err
 			}
 			if err = lsn.logBroadcaster.MarkConsumed(req.lb, pg.WithQueryer(tx)); err != nil {
 				return err
 			}
 
-			maxLinkString := maxLink.String()
+			maxLinkString := simResult.maxLink.String()
 			_, err = lsn.txm.CreateEthTransaction(txmgr.NewTx{
 				FromAddress:    fromAddress,
 				ToAddress:      lsn.coordinator.Address(),
-				EncodedPayload: hexutil.MustDecode(payload),
-				GasLimit:       gaslimit,
+				EncodedPayload: hexutil.MustDecode(simResult.encodedPayload),
+				GasLimit:       simResult.estimateGasLimit,
 				Meta: &txmgr.EthTxMeta{
 					RequestID: common.BytesToHash(vrfRequest.RequestId.Bytes()),
 					MaxLink:   &maxLinkString,
@@ -444,7 +680,7 @@ func (lsn *listenerV2) processRequestsPerSub(
 
 		// If we successfully enqueued for the txm, subtract that balance
 		// And loop to attempt to enqueue another fulfillment
-		startBalanceNoReserveLink.Sub(startBalanceNoReserveLink, maxLink)
+		startBalanceNoReserveLink.Sub(startBalanceNoReserveLink, simResult.maxLink)
 		processed[vrfRequest.RequestId.String()] = struct{}{}
 		incProcessedReqs(lsn.job.Name.ValueOrZero(), lsn.job.ExternalJobID, v2)
 	}
@@ -483,13 +719,25 @@ func (lsn *listenerV2) estimateFeeJuels(
 	return juelsNeeded, nil
 }
 
+type simulationResult struct {
+	maxLink          *big.Int
+	run              pipeline.Run
+	encodedPayload   string
+	estimateGasLimit uint64
+	proof            vrf_coordinator_v2.VRFProof
+	reqCommitment    vrf_coordinator_v2.VRFCoordinatorV2RequestCommitment
+}
+
 // Here we use the pipeline to parse the log, generate a vrf response
 // then simulate the transaction at the max gas price to determine its maximum link cost.
-func (lsn *listenerV2) getMaxLinkForFulfillment(
+func (lsn *listenerV2) simulateFulfillment(
 	maxGasPriceWei *big.Int,
 	req pendingRequest,
 	lg logger.Logger,
-) (*big.Int, pipeline.Run, string, uint64, error) {
+) (
+	result *simulationResult,
+	err error,
+) {
 	// estimate how much juels are needed so that we can log it if the simulation fails.
 	juelsNeeded, err := lsn.estimateFeeJuels(req.req, maxGasPriceWei)
 	if err != nil {
@@ -500,11 +748,7 @@ func (lsn *listenerV2) getMaxLinkForFulfillment(
 		)
 		juelsNeeded = big.NewInt(0)
 	}
-	var (
-		maxLink  *big.Int
-		payload  string
-		gaslimit uint64
-	)
+
 	vars := pipeline.NewVarsFrom(map[string]interface{}{
 		"jobSpec": map[string]interface{}{
 			"databaseID":    lsn.job.ID,
@@ -524,35 +768,54 @@ func (lsn *listenerV2) getMaxLinkForFulfillment(
 	run, trrs, err := lsn.pipelineRunner.ExecuteRun(context.Background(), *lsn.job.PipelineSpec, vars, lg)
 	if err != nil {
 		lg.Errorw("Failed executing run", "err", err)
-		return maxLink, run, payload, gaslimit, err
+		return nil, err
 	}
 	// The call task will fail if there are insufficient funds
 	if run.AllErrors.HasError() {
 		lg.Warnw("Simulation errored, possibly insufficient funds. Request will remain unprocessed until funds are available",
 			"err", run.AllErrors.ToError(), "max gas price", maxGasPriceWei, "reqID", req.req.RequestId, "juelsNeeded", juelsNeeded)
-		return maxLink, run, payload, gaslimit, errors.Wrap(run.AllErrors.ToError(), "simulation errored")
+		return nil, errors.Wrap(run.AllErrors.ToError(), "simulation errored")
 	}
 	if len(trrs.FinalResult(lg).Values) != 1 {
 		lg.Errorw("Unexpected number of outputs", "expectedNumOutputs", 1, "actualNumOutputs", len(trrs.FinalResult(lg).Values))
-		return maxLink, run, payload, gaslimit, errors.New("unexpected number of outputs")
+		return nil, errors.New("unexpected number of outputs")
 	}
+
 	// Run succeeded, we expect a byte array representing the billing amount
 	b, ok := trrs.FinalResult(lg).Values[0].([]uint8)
 	if !ok {
 		lg.Errorw("Unexpected type, expected []uint8 final result")
-		return maxLink, run, payload, gaslimit, errors.New("expected []uint8 final result")
+		return nil, errors.New("expected []uint8 final result")
 	}
-	maxLink = utils.HexToBig(hexutil.Encode(b)[2:])
+	maxLink := utils.HexToBig(hexutil.Encode(b)[2:])
+
+	var (
+		payload  string
+		pf       vrf_coordinator_v2.VRFProof
+		rc       vrf_coordinator_v2.VRFCoordinatorV2RequestCommitment
+		gaslimit uint64
+	)
 	for _, trr := range trrs {
 		if trr.Task.Type() == pipeline.TaskTypeVRFV2 {
 			m := trr.Result.Value.(map[string]interface{})
 			payload = m["output"].(string)
+			pf = m["proof"].(vrf_coordinator_v2.VRFProof)
+			rc = m["requestCommitment"].(vrf_coordinator_v2.VRFCoordinatorV2RequestCommitment)
 		}
+
 		if trr.Task.Type() == pipeline.TaskTypeEstimateGasLimit {
 			gaslimit = trr.Result.Value.(uint64)
 		}
 	}
-	return maxLink, run, payload, gaslimit, nil
+
+	return &simulationResult{
+		maxLink:          maxLink,
+		run:              run,
+		encodedPayload:   payload,
+		estimateGasLimit: gaslimit,
+		proof:            pf,
+		reqCommitment:    rc,
+	}, nil
 }
 
 func (lsn *listenerV2) runRequestHandler(pollPeriod time.Duration, wg *sync.WaitGroup) {
@@ -703,7 +966,7 @@ func (lsn *listenerV2) HandleLog(lb log.Broadcast) {
 	}
 }
 
-// Job complies with log.Listener
+// JobID complies with log.Listener
 func (lsn *listenerV2) JobID() int32 {
 	return lsn.job.ID
 }

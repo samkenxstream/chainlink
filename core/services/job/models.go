@@ -425,6 +425,8 @@ type KeeperSpec struct {
 
 type VRFSpec struct {
 	ID                       int32
+	BatchCoordinatorAddress  *ethkey.EIP55Address  `toml:"batchCoordinatorAddress"`
+	BatchFulfillmentEnabled  bool                  `toml:"batchFulfillmentEnabled"`
 	CoordinatorAddress       ethkey.EIP55Address   `toml:"coordinatorAddress"`
 	PublicKey                secp256k1.PublicKey   `toml:"publicKey"`
 	MinIncomingConfirmations uint32                `toml:"minIncomingConfirmations"`

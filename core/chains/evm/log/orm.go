@@ -2,16 +2,18 @@ package log
 
 import (
 	"database/sql"
+	"fmt"
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/pkg/errors"
 
+	"github.com/smartcontractkit/sqlx"
+
 	"github.com/smartcontractkit/chainlink/core/logger"
 	"github.com/smartcontractkit/chainlink/core/services/pg"
 	"github.com/smartcontractkit/chainlink/core/utils"
-	"github.com/smartcontractkit/sqlx"
 )
 
 //go:generate mockery --name ORM --output ./mocks/ --case=underscore --structname ORM --filename orm.go
@@ -31,6 +33,8 @@ type ORM interface {
 	WasBroadcastConsumed(blockHash common.Hash, logIndex uint, jobID int32, qopts ...pg.QOpt) (bool, error)
 	// MarkBroadcastConsumed marks the log broadcast as consumed by jobID.
 	MarkBroadcastConsumed(blockHash common.Hash, blockNumber uint64, logIndex uint, jobID int32, qopts ...pg.QOpt) error
+	// MarkBroadcastsConsumed marks the log broadcasts as consumed by jobID.
+	MarkBroadcastsConsumed(blockHashes []common.Hash, blockNumbers []uint64, logIndexes []uint, jobIDs []int32, qopts ...pg.QOpt) error
 	// MarkBroadcastsUnconsumed marks all log broadcasts from all jobs on or after fromBlock as
 	// unconsumed.
 	MarkBroadcastsUnconsumed(fromBlock int64, qopts ...pg.QOpt) error
@@ -111,6 +115,35 @@ func (o *orm) MarkBroadcastConsumed(blockHash common.Hash, blockNumber uint64, l
 		SET consumed = true, updated_at = NOW()
     `, blockHash, blockNumber, logIndex, jobID, o.evmChainID)
 	return errors.Wrap(err, "failed to mark log broadcast as consumed")
+}
+
+func (o *orm) MarkBroadcastsConsumed(blockHashes []common.Hash, blockNumbers []uint64, logIndexes []uint, jobIDs []int32, qopts ...pg.QOpt) error {
+	q := o.q.WithOpts(qopts...)
+	query := `
+INSERT INTO log_broadcasts (block_hash, block_number, log_index, job_id, created_at, updated_at, consumed, evm_chain_id)
+VALUES 
+`
+	counter := 1
+	var args []interface{}
+	for i := range blockHashes {
+		query += fmt.Sprintf(
+			"($%d, $%d, $%d, $%d, NOW(), NOW(), true, $%d),",
+			counter,
+			counter+1,
+			counter+2,
+			counter+3,
+			counter+4,
+		)
+		args = append(args, blockHashes[i], blockNumbers[i], logIndexes[i], jobIDs[i], o.evmChainID)
+		counter += 5
+	}
+	query = query[:len(query)-1] // remove trailing comma
+	query += `
+ON CONFLICT (job_id, block_hash, log_index, evm_chain_id) DO UPDATE
+SET consumed = true, updated_at = NOW()
+	`
+	err := q.ExecQ(query, args...)
+	return errors.Wrap(err, "failed to mark log broadcasts as consumed")
 }
 
 // MarkBroadcastsUnconsumed implements the ORM interface.

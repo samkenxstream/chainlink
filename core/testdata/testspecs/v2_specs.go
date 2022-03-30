@@ -237,6 +237,8 @@ type VRFSpecParams struct {
 	JobID                    string
 	Name                     string
 	CoordinatorAddress       string
+	BatchCoordinatorAddress  string
+	BatchFulfillmentEnabled  bool
 	MinIncomingConfirmations int
 	FromAddresses            []string
 	PublicKey                string
@@ -267,6 +269,10 @@ func GenerateVRFSpec(params VRFSpecParams) VRFSpec {
 	coordinatorAddress := "0xABA5eDc1a551E55b1A570c0e1f1055e5BE11eca7"
 	if params.CoordinatorAddress != "" {
 		coordinatorAddress = params.CoordinatorAddress
+	}
+	batchCoordinatorAddress := "0x5C7B1d96CA3132576A84423f624C2c492f668Fea"
+	if params.BatchCoordinatorAddress != "" {
+		batchCoordinatorAddress = params.BatchCoordinatorAddress
 	}
 	confirmations := 6
 	if params.MinIncomingConfirmations != 0 {
@@ -335,6 +341,8 @@ type = "vrf"
 schemaVersion = 1
 name = "%s"
 coordinatorAddress = "%s"
+batchCoordinatorAddress = "%s"
+batchFulfillmentEnabled = %v
 minIncomingConfirmations = %d
 requestedConfsDelay = %d
 requestTimeout = "%s"
@@ -343,7 +351,7 @@ observationSource = """
 %s
 """
 `
-	toml := fmt.Sprintf(template, jobID, name, coordinatorAddress, confirmations, params.RequestedConfsDelay,
+	toml := fmt.Sprintf(template, jobID, name, coordinatorAddress, batchCoordinatorAddress, params.BatchFulfillmentEnabled, confirmations, params.RequestedConfsDelay,
 		requestTimeout.String(), publicKey, observationSource)
 	if len(params.FromAddresses) != 0 {
 		var addresses []string
@@ -357,6 +365,8 @@ observationSource = """
 		JobID:                    jobID,
 		Name:                     name,
 		CoordinatorAddress:       coordinatorAddress,
+		BatchCoordinatorAddress:  batchCoordinatorAddress,
+		BatchFulfillmentEnabled:  params.BatchFulfillmentEnabled,
 		MinIncomingConfirmations: confirmations,
 		PublicKey:                publicKey,
 		ObservationSource:        observationSource,
