@@ -183,9 +183,12 @@ func (n *node) transitionToOutOfSync(fn func()) {
 		return
 	}
 	switch n.state {
-	case NodeStateAlive:
+	case NodeStateDialed, NodeStateAlive:
 		// Need to disconnect all clients subscribed to this node
 		n.ws.rpc.Close()
+		if n.http != nil {
+			n.http.rpc.Close()
+		}
 		n.cancelInflightRequests()
 		n.state = NodeStateOutOfSync
 	default:
@@ -213,6 +216,9 @@ func (n *node) transitionToUnreachable(fn func()) {
 	case NodeStateUndialed, NodeStateDialed, NodeStateAlive, NodeStateOutOfSync:
 		// Need to disconnect all clients subscribed to this node
 		n.ws.rpc.Close()
+		if n.http != nil {
+			n.http.rpc.Close()
+		}
 		n.cancelInflightRequests()
 		n.state = NodeStateUnreachable
 	default:
@@ -240,6 +246,9 @@ func (n *node) transitionToInvalidChainID(fn func()) {
 	case NodeStateDialed:
 		// Need to disconnect all clients subscribed to this node
 		n.ws.rpc.Close()
+		if n.http != nil {
+			n.http.rpc.Close()
+		}
 		n.cancelInflightRequests()
 		n.state = NodeStateInvalidChainID
 	default:
